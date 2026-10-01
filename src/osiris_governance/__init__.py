@@ -9,6 +9,8 @@ from .canonical import (
     normalize_and_canonicalize,
     strict_parse_json,
 )
+from .closure import closure_signing_payload, validate_closure
+from .closure_verify import ClosureVerificationReport, sign_closure, verify_closure
 from .scientific_evidence import (
     ScientificEvidencePackResult,
     ScientificEvidenceStatus,
@@ -50,6 +52,7 @@ from .errors import (
     AdjudicationError,
     AuthorityGateError,
     CapabilityNotPermitted,
+    ClosureValidationError,
     ConfinementViolationError,
     EpochMismatch,
     ExecutionBindingMismatch,
@@ -60,6 +63,7 @@ from .errors import (
     ProposalExpired,
     SchemaValidationError,
     ScopeViolation,
+    SigningUnavailableError,
     SubstitutionViolationError,
 )
 from .execution_gate import ExecutionContract, ExecutionGate
@@ -98,6 +102,13 @@ __version__ = "0.2.0"
 __all__ = [
     "CANONICALIZATION_VERSION",
     "JCS_SAFE_INTEGER_MAX",
+    "validate_closure",
+    "closure_signing_payload",
+    "sign_closure",
+    "verify_closure",
+    "ClosureVerificationReport",
+    "ClosureValidationError",
+    "SigningUnavailableError",
     "canonical_sha256",
     "canonicalize_json",
     "strict_parse_json",

@@ -81,3 +81,16 @@ class AuthorityGateError(GovernanceViolation):
 class MutableReferenceError(GovernanceViolation):
     """Raised when a mutable reference (e.g. git branch, tag, latest) is used instead of an immutable content digest."""
     pass
+
+
+class ClosureValidationError(GovernanceViolation):
+    """Raised when a claim closure violates its schema or policy; carries every violation found."""
+
+    def __init__(self, violations):
+        self.violations = list(violations)
+        super().__init__("; ".join(self.violations) or "closure invalid")
+
+
+class SigningUnavailableError(GovernanceError):
+    """Raised when signing or signature verification is requested without the `cryptography` package."""
+    pass
