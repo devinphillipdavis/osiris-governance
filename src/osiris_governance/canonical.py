@@ -7,14 +7,21 @@ Specification:
 4. Object members: Sorted recursively using lexicographic ASCII code-point order.
 5. Arrays: Preserve supplied element order exactly.
 6. Object keys: Strings only, ASCII-only; unique (duplicates rejected before canonicalization).
-7. Strings: Valid Unicode strings subject to Unicode NFC normalization; no bidi controls.
+7. Strings: Valid Unicode already in NFC; no bidi controls, no lone surrogates. Non-NFC input
+   is rejected, never normalized: canonicalization must not change a value it hashes. Producers
+   that accept free text normalize it themselves before building the record.
 8. Booleans: Only lowercase JSON literals 'true' and 'false'.
 9. Null: Only lowercase JSON literal 'null' if schema permits.
-10. Integers: Exact base-10 JSON integer spelling, no leading plus, decimal point, or exponent.
+10. Integers: Exact base-10 JSON integer spelling, no leading plus, decimal point, or exponent,
+    within +/-(2**53 - 1), the range RFC 8785 serializes exactly. Larger magnitudes are rejected.
 11. Floats: Strictly rejected.
 12. NaN / Infinity: Strictly rejected.
 13. Trailing newline: Forbidden.
 14. Content identifier: SHA-256(canonical_bytes) is a binding digest, not a signature.
+
+RFC 8785 relationship: this profile is a strict subset of RFC 8785 (JCS). It accepts fewer inputs
+(rules 6, 7, 10, 11), and every input it accepts serializes to the same bytes RFC 8785 produces.
+tests/test_canonical_rfc8785.py checks that against the independent `rfc8785` package.
 """
 
 from __future__ import annotations
@@ -28,6 +35,9 @@ import unicodedata
 from .errors import SchemaValidationError
 
 CANONICALIZATION_VERSION = "OSIRIS-CANONICAL-JSON-V1"
+
+# RFC 8785 serializes numbers as IEEE 754 doubles; integers beyond this magnitude lose exactness.
+JCS_SAFE_INTEGER_MAX = 2**53 - 1
 
 # Forbidden Unicode Bidirectional control codepoints
 BIDI_CONTROL_CODEPOINTS = {
@@ -70,6 +80,25 @@ def _reject_constant(val: str) -> None:
     )
 
 
+def _integer_out_of_range(path: str) -> SchemaValidationError:
+    return SchemaValidationError(
+        f"INTEGER_OUT_OF_RANGE: Integer at '{path}' exceeds +/-{JCS_SAFE_INTEGER_MAX} "
+        f"(RFC 8785 cannot serialize it exactly) in {CANONICALIZATION_VERSION}. "
+        "Encode it as a decimal string."
+    )
+
+
+def _parse_int_in_range(val: str) -> int:
+    """Parses a JSON integer token, rejecting magnitudes RFC 8785 cannot represent exactly."""
+    # Length check first: int() on a very long token is slow and raises past 4300 digits.
+    if len(val.lstrip("-")) > len(str(JCS_SAFE_INTEGER_MAX)):
+        raise _integer_out_of_range("JSON input")
+    number = int(val)
+    if abs(number) > JCS_SAFE_INTEGER_MAX:
+        raise _integer_out_of_range("JSON input")
+    return number
+
+
 def strict_parse_json(raw: bytes | str) -> Any:
     """Strict JSON parser enforcing OSIRIS-CANONICAL-JSON-V1 parser rules:
     
@@ -77,7 +106,8 @@ def strict_parse_json(raw: bytes | str) -> Any:
     2. Rejects invalid UTF-8.
     3. Rejects duplicate object keys.
     4. Rejects float numbers, NaN, and Infinity.
-    5. Rejects trailing non-whitespace data after the root object/array.
+    5. Rejects integers beyond +/-(2**53 - 1).
+    6. Rejects trailing non-whitespace data after the root object/array.
     """
     if isinstance(raw, bytes):
         if raw.startswith(b"\xef\xbb\xbf"):
@@ -96,6 +126,7 @@ def strict_parse_json(raw: bytes | str) -> Any:
     decoder = json.JSONDecoder(
         object_pairs_hook=_reject_duplicate_keys,
         parse_float=_reject_float,
+        parse_int=_parse_int_in_range,
         parse_constant=_reject_constant,
     )
 
@@ -112,26 +143,39 @@ def strict_parse_json(raw: bytes | str) -> Any:
 
 
 def enforce_unicode_policy(value: Any, path: str = "root") -> Any:
-    """Recursively validates and applies the OSIRIS Unicode Policy:
-    
+    """Recursively validates the OSIRIS Unicode Policy, rejecting rather than repairing:
+
     1. Schema & Object Keys: Must be ASCII-only.
-    2. Free-text strings: Must be normalized to Unicode NFC.
+    2. Free-text strings: Must already be in Unicode NFC (non-NFC is rejected, not normalized).
     3. Control characters: ASCII < 32 forbidden (newlines/tabs already parsed from JSON escapes).
     4. Bidirectional controls: Strictly forbidden.
+    5. Lone surrogates (U+D800..U+DFFF): Strictly forbidden; they cannot be encoded as UTF-8.
+
+    Returns the value with mappings, tuples and dataclasses converted to plain dicts and lists.
+    String contents are never changed.
     """
     if isinstance(value, str):
-        # Check bidi controls and forbidden control characters
+        # Check bidi controls, surrogates and forbidden control characters
         for ch in value:
             cp = ord(ch)
             if cp in BIDI_CONTROL_CODEPOINTS:
                 raise SchemaValidationError(
                     f"BIDI_CONTROL_FORBIDDEN: Bidirectional control character U+{cp:04X} forbidden at '{path}'."
                 )
+            if 0xD800 <= cp <= 0xDFFF:
+                raise SchemaValidationError(
+                    f"INVALID_UNICODE: Lone surrogate U+{cp:04X} forbidden at '{path}'."
+                )
             if cp < 32 and ch not in ("\t", "\n", "\r"):
                 raise SchemaValidationError(
                     f"CONTROL_CHAR_FORBIDDEN: Unescaped control character U+{cp:04X} forbidden at '{path}'."
                 )
-        return unicodedata.normalize("NFC", value)
+        if not unicodedata.is_normalized("NFC", value):
+            raise SchemaValidationError(
+                f"NON_NFC_STRING: String at '{path}' is not in Unicode NFC. Canonicalization does "
+                "not normalize; the producer must normalize text before building the record."
+            )
+        return value
 
     if isinstance(value, (list, tuple)):
         return [enforce_unicode_policy(item, f"{path}[{idx}]") for idx, item in enumerate(value)]
@@ -170,6 +214,8 @@ def _validate_types_recursive(value: Any, path: str = "root") -> None:
             "Use integer fixed-point or decimal string representation."
         )
     if isinstance(value, int):
+        if abs(value) > JCS_SAFE_INTEGER_MAX:
+            raise _integer_out_of_range(path)
         return
     if isinstance(value, str):
         return
@@ -194,13 +240,16 @@ def _validate_types_recursive(value: Any, path: str = "root") -> None:
     )
 
 
-def canonicalize_json(data: Any, apply_unicode_normalization: bool = True) -> bytes:
-    """Serializes arbitrary structured data into canonical UTF-8 bytes per OSIRIS-CANONICAL-JSON-V1."""
+def canonicalize_json(data: Any) -> bytes:
+    """Serializes arbitrary structured data into canonical UTF-8 bytes per OSIRIS-CANONICAL-JSON-V1.
+
+    The Unicode policy is always enforced: skipping it would admit non-ASCII keys, whose sort order
+    here (code points) can differ from RFC 8785 (UTF-16 code units).
+    """
     if is_dataclass(data) and not isinstance(data, type):
         data = asdict(data)
 
-    if apply_unicode_normalization:
-        data = enforce_unicode_policy(data)
+    data = enforce_unicode_policy(data)
 
     _validate_types_recursive(data)
 
@@ -234,20 +283,21 @@ def normalize_and_canonicalize(
     raw: bytes | str,
     schema_validator: Optional[Callable[[Any], None]] = None,
 ) -> Tuple[bytes, str]:
-    """Executes the full 7-stage normalization and canonicalization pipeline:
-    
-    1. Strict parse with duplicate-key & float detection.
+    """Executes the full 6-stage canonicalization pipeline:
+
+    1. Strict parse with duplicate-key, float and integer-range detection.
     2. Schema validation & unknown field rejection (if schema_validator provided).
-    3. Semantic type restrictions & Unicode policy enforcement (NFC, ASCII keys, no bidi).
-    4. Recursive canonical serialization (sorted keys, preserved array order, whitespace-free).
-    5. Generation of UTF-8 canonical bytes.
-    6. Computation of SHA-256 request digest.
-    7. Returns (canonical_bytes, digest).
+    3. Semantic type restrictions & Unicode policy enforcement (NFC required, ASCII keys, no bidi).
+    4. Recursive canonical serialization to UTF-8 bytes (sorted keys, preserved array order,
+       whitespace-free).
+    5. Computation of SHA-256 request digest.
+    6. Returns (canonical_bytes, digest).
+
+    Despite the name, nothing is normalized: input that is not already canonical-ready is rejected.
     """
     parsed = strict_parse_json(raw)
     if schema_validator is not None:
         schema_validator(parsed)
-    normalized = enforce_unicode_policy(parsed)
-    canonical_bytes = canonicalize_json(normalized, apply_unicode_normalization=False)
+    canonical_bytes = canonicalize_json(parsed)
     digest = canonical_sha256(canonical_bytes)
     return canonical_bytes, digest

@@ -4,7 +4,7 @@
 **Document ID:** `OSIRIS-EVIDENCE-MODEL-V1`  
 **Status:** Approved Reference Implementation  
 **Governing Standard:** RFC 8785 JSON Canonicalization & OSIRIS Epistemic Separation  
-**Last Updated:** 2026-09-27T11:28:00Z  
+**Last Updated:** 2026-10-01  
 
 ---
 
@@ -16,27 +16,19 @@ In distributed autonomous systems, claims of verification or compliance are inva
 
 ## 2. Canonical Data Representation: RFC 8785 Profile (V1)
 
-To ensure that cryptographic digests are invariant across programming languages, operating systems, and serialization libraries, OSIRIS strictly mandates the **RFC 8785 JSON Canonicalization Scheme (JCS)** profile implemented in `src/osiris_governance/canonical.py`.
+To ensure that cryptographic digests are invariant across programming languages, operating systems, and serialization libraries, OSIRIS uses `OSIRIS-CANONICAL-JSON-V1`, implemented in `src/osiris_governance/canonical.py`. It is a **strict subset of RFC 8785 (JCS)**: it accepts fewer inputs, and every input it accepts serializes to exactly the bytes RFC 8785 produces. `tests/test_canonical_rfc8785.py` checks this against the independent `rfc8785` package, including a 5,000-value differential test.
 
 ### Canonicalization Invariants
-1. **Deterministic Key Ordering:** JSON object keys must be sorted lexicographically by their UTF-16 code units (byte-level ASCII ordering for ASCII keys).
-2. **Whitespace Stripping:** No whitespace outside of string literals (separators must be `,` and `:` with zero surrounding spaces).
-3. **Unicode Normalization:** All string data must be normalized to Unicode Normalization Form C (NFC).
+1. **Deterministic Key Ordering:** Object keys are ASCII-only, so code-point order equals the UTF-16 code-unit order RFC 8785 specifies.
+2. **Whitespace Stripping:** No whitespace outside of string literals (separators `,` and `:`).
+3. **Unicode:** Strings must already be in NFC. Non-NFC input is **rejected, not normalized** (`NON_NFC_STRING`): canonicalization never changes a value it hashes. Producers that accept free text normalize it before building the record (as `LivLMService.handle_intent` does). Lone surrogates, bidirectional controls and C0 controls other than tab, newline and carriage return are rejected.
 4. **Prohibition of IEEE 754 Floats:**
    - **Rationale:** Floating-point representations suffer from cross-platform non-determinism (`-0.0` vs `+0.0`, NaN payloads, precision differences between x86 and ARM).
-   - **Enforcement:** Floats are strictly rejected at canonical boundaries. Continuous metrics (e.g., currency, percentages, weights) must be represented as **fixed-point integers** or scaled integer representations (e.g., basis points or integer micro-units).
+   - **Enforcement:** Floats are strictly rejected at canonical boundaries. Continuous metrics (e.g., currency, percentages, weights) must be represented as **fixed-point integers** or scaled integer representations (e.g., basis points or integer micro-units), or as decimal strings.
+5. **Integer Range:** Integers must lie within +/-(2^53 - 1) (`INTEGER_OUT_OF_RANGE` otherwise). RFC 8785 serializes numbers as IEEE 754 doubles, so larger integers cannot be represented exactly; encode them as decimal strings.
+6. **Strict Parsing:** Duplicate keys, a byte-order mark, NaN/Infinity and trailing data are rejected at parse time (`strict_parse_json`).
 
-```python
-# src/osiris_governance/canonical.py excerpt
-def canonical_json(data: Any) -> bytes:
-    validate_no_floats(data)  # Raises FloatRejectionError if float detected
-    return json.dumps(
-        data,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(',', ':')
-    ).encode('utf-8')
-```
+Change log: on 2026-10-01 rules 3 and 5 changed from silently normalizing to NFC and accepting any integer, which produced bytes RFC 8785 would not, to rejecting those inputs. No digest of an input that is still accepted changed.
 
 ---
 
@@ -100,7 +92,7 @@ Traditional CI/CD systems treat failed builds as ephemeral noise, overwriting st
 To independently verify any claim asserted in the evidence ledger, an auditor executes the deterministic replay protocol:
 
 1. **Input Extraction:** Retrieve the raw, un-canonicalized inputs recorded in the evidence artifact.
-2. **Canonical Transformation:** Run inputs through `canonical_json()`, verifying float absence and UTF-8 NFC ordering.
+2. **Canonical Transformation:** Run inputs through `canonicalize_json()`, which rejects floats, out-of-range integers and non-NFC strings.
 3. **Digest Verification:** Assert that $\operatorname{SHA-256}(\operatorname{CanonicalJSON}(\text{Inputs})) == \text{Recorded Input Hash}$.
 4. **Isolated Policy Execution:** Execute the exact policy version specified by `policy_revision` inside a deterministic runtime.
 5. **Decision Comparison:** Assert that the re-computed gate outcome matches the recorded adjudication status exactly. If results diverge, the evidence is rejected as `UNVERIFIED_OR_CORRUPT`.

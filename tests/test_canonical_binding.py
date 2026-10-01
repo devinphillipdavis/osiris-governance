@@ -35,9 +35,9 @@ TEST_VECTORS = [
         "expected_sha256": "sha256:" + hashlib.sha256(b'{"items":["b","a"]}').hexdigest(),
     },
     {
-        "id": "unicode-nfc",
-        "input": '{"message":"e\u0301"}', # e + combining acute accent (NFD)
-        "canonical_utf8": '{"message":"\u00e9"}'.encode("utf-8"), # é (NFC)
+        "id": "unicode-nfc-unchanged",
+        "input": '{"message":"\u00e9"}',  # already NFC: emitted as raw UTF-8, not escaped
+        "canonical_utf8": '{"message":"\u00e9"}'.encode("utf-8"),
         "expected_sha256": "sha256:" + hashlib.sha256('{"message":"\u00e9"}'.encode("utf-8")).hexdigest(),
     },
 ]
@@ -77,6 +77,49 @@ def test_reject_bidi_controls():
     # U+202E is Right-to-Left Override (RLO)
     with pytest.raises(SchemaValidationError, match="BIDI_CONTROL_FORBIDDEN"):
         normalize_and_canonicalize('{"message":"test\u202eoverride"}')
+
+
+def test_reject_non_nfc_string_instead_of_normalizing():
+    # e + combining acute accent (NFD). Normalizing would hash a value the producer never sent.
+    with pytest.raises(SchemaValidationError, match="NON_NFC_STRING"):
+        normalize_and_canonicalize('{"message":"e\u0301"}')
+    with pytest.raises(SchemaValidationError, match="NON_NFC_STRING"):
+        canonicalize_json({"nested": ["e\u0301"]})
+    with pytest.raises(SchemaValidationError, match="NON_NFC_STRING"):
+        enforce_unicode_policy("e\u0301")
+
+
+def test_enforce_unicode_policy_never_changes_strings():
+    value = {"a": ("x", "\u00e9"), "b": "plain"}
+    assert enforce_unicode_policy(value) == {"a": ["x", "\u00e9"], "b": "plain"}
+
+
+@pytest.mark.parametrize("number", [2**53 - 1, -(2**53 - 1), 0])
+def test_integers_at_safe_bound_accepted(number):
+    assert canonicalize_json({"n": number}) == f'{{"n":{number}}}'.encode()
+    assert strict_parse_json(f'{{"n":{number}}}') == {"n": number}
+
+
+@pytest.mark.parametrize("number", [2**53, -(2**53), 10**21])
+def test_integers_beyond_safe_bound_rejected(number):
+    with pytest.raises(SchemaValidationError, match="INTEGER_OUT_OF_RANGE"):
+        canonicalize_json({"n": number})
+    with pytest.raises(SchemaValidationError, match="INTEGER_OUT_OF_RANGE"):
+        strict_parse_json('{"n":%d}' % number)
+
+
+def test_very_long_integer_token_rejected_before_conversion():
+    # Python refuses int() on tokens past 4300 digits; the range check must fire first.
+    with pytest.raises(SchemaValidationError, match="INTEGER_OUT_OF_RANGE"):
+        strict_parse_json('{"n":1' + "0" * 5000 + "}")
+    with pytest.raises(SchemaValidationError, match="INTEGER_OUT_OF_RANGE"):
+        canonicalize_json({"n": 10**5000})
+
+
+def test_reject_lone_surrogate():
+    parsed = strict_parse_json('{"s":"\\ud800"}')  # JSON escapes can smuggle in a lone surrogate
+    with pytest.raises(SchemaValidationError, match="INVALID_UNICODE"):
+        canonicalize_json(parsed)
 
 
 def test_reject_non_ascii_keys():

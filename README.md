@@ -16,7 +16,7 @@
 src/osiris_governance/
 ├── __init__.py
 ├── contracts.py       # ActionProposal, ReplayExecutionPermit, Enums
-├── canonical.py       # OSIRIS-CANONICAL-JSON-V1 serialization & hashing
+├── canonical.py       # OSIRIS-CANONICAL-JSON-V1 serialization & hashing (strict RFC 8785 subset)
 ├── governor.py        # Deterministic CapabilityGovernor & Policy
 ├── replay.py          # Pure in-memory ReplayAdapter (Zero filesystem)
 └── errors.py          # Typed GovernanceViolation hierarchy

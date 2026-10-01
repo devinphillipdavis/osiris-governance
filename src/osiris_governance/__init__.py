@@ -2,6 +2,7 @@
 
 from .canonical import (
     CANONICALIZATION_VERSION,
+    JCS_SAFE_INTEGER_MAX,
     canonical_sha256,
     canonicalize_json,
     enforce_unicode_policy,
@@ -96,6 +97,7 @@ __version__ = "0.2.0"
 
 __all__ = [
     "CANONICALIZATION_VERSION",
+    "JCS_SAFE_INTEGER_MAX",
     "canonical_sha256",
     "canonicalize_json",
     "strict_parse_json",

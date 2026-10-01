@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone, timedelta
 import hashlib
@@ -112,11 +113,12 @@ class LivLMService:
 
         intent_type, required_capability, confidence = IntentClassifier.classify(user_text)
 
-        # Build raw proposal for canonical normalization
+        # Build raw proposal for canonicalization. User text is normalized to NFC here, at the
+        # producer: the canonicalizer rejects non-NFC text instead of rewriting it.
         proposal = {
             "client_nonce": client_nonce,
             "intent_type": intent_type,
-            "prompt": user_text.strip(),
+            "prompt": unicodedata.normalize("NFC", user_text.strip()),
             "required_capability": required_capability,
             "side_effects_allowed": False,
         }

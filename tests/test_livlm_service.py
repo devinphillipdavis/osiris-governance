@@ -160,3 +160,12 @@ def test_livlm_http_server_endpoints():
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_decomposed_prompt_is_normalized_by_the_service_not_the_canonicalizer():
+    # The canonicalizer rejects non-NFC text; the service, as producer, normalizes user input first.
+    decomposed = "Replay fixture caf" + "e\u0301"
+    composed = "Replay fixture caf\u00e9"
+    first = LivLMService(ledger_id="test-nfc-1").handle_intent(decomposed, client_nonce="n-1")
+    second = LivLMService(ledger_id="test-nfc-2").handle_intent(composed, client_nonce="n-1")
+    assert first["request_hash"] == second["request_hash"]
