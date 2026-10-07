@@ -191,3 +191,12 @@ def test_batch_values_recomputed_from_raw():
     assert v.batch_values(samples) == [1.0, 2.5]
     with pytest.raises(EvidenceIntegrityError):
         v.batch_values(neither)
+
+
+def test_mean_qubit_zero_probability_matches_dnalang_survival_plus():
+    counts = {"00": 500, "01": 200, "10": 100, "11": 200}
+    # qubit 0 (rightmost) reads 0 in 00,10: 600/1000; qubit 1 in 00,01: 700/1000
+    assert ExternalVerifier.recompute_mean_qubit_zero_probability(counts) == pytest.approx(0.65)
+    pkg = RawDataPackage(raw_id="M", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL, provider_receipt_id=None,
+                         raw_payload={"counts": counts}, captured_at_utc="t", metadata={"metric": "mean_qubit_zero_probability"})
+    assert ExternalVerifier().batch_values(pkg) == [pytest.approx(0.65)]

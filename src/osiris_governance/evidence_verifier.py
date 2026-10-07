@@ -100,6 +100,11 @@ class ExternalVerifier:
         payload = raw_pkg.raw_payload
         if "counts" in payload:
             counts = payload["counts"]
+            metric = raw_pkg.metadata.get("metric", "survival_fidelity")
+            if metric == "mean_qubit_zero_probability":
+                return [self.recompute_mean_qubit_zero_probability(counts)]
+            if metric != "survival_fidelity":
+                raise EvidenceIntegrityError(f"raw package {raw_pkg.raw_id}: unknown counts metric '{metric}'")
             n_qubits = max((len(k) for k in counts), default=0)
             target = raw_pkg.metadata.get("target_state", "0" * n_qubits)
             return [self.recompute_survival_fidelity(counts, target)]
@@ -144,6 +149,15 @@ class ExternalVerifier:
             "z_expectations": z_expectations,
             "parity": parity,
         }
+
+    @classmethod
+    def recompute_mean_qubit_zero_probability(cls, counts: Mapping[str, int]) -> float:
+        """Mean over qubits of P(qubit reads 0); with a final H on every qubit this is
+        mean |+> survival (dnalang.metrics.survival_plus)."""
+        z = cls.recompute_bitstring_counts(counts)["z_expectations"]
+        if not z:
+            raise EvidenceIntegrityError("Raw counts have no qubits")
+        return float(sum((1.0 + v) / 2.0 for v in z.values()) / len(z))
 
     @staticmethod
     def recompute_survival_fidelity(counts: Mapping[str, int], target_state: str) -> float:
@@ -208,6 +222,7 @@ class ExternalVerifier:
 
             target = raw_pkg.metadata.get("target_state", "0" * res["n_qubits"])
             recomputed["survival_fidelity"] = self.recompute_survival_fidelity(counts, target)
+            recomputed["mean_qubit_zero_probability"] = self.recompute_mean_qubit_zero_probability(counts)
 
         if "samples_ms" in raw_pkg.raw_payload:
             stats = self.recompute_continuous_samples(raw_pkg.raw_payload["samples_ms"])
