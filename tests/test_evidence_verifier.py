@@ -1,7 +1,8 @@
 """Tests for Stage 1 Evidence Verifier and Document Claim Scanner."""
 
 import pytest
-from osiris_governance.errors import EvidenceIntegrityError
+from osiris_governance.contracts import PermitAuthority
+from osiris_governance.errors import AuthorityGateError, EvidenceIntegrityError
 from osiris_governance.evidence_verifier import (
     DEFAULT_NUMERICAL_TOLERANCE,
     ExternalVerifier,
@@ -11,6 +12,8 @@ from osiris_governance.evidence_verifier import (
 from osiris_governance.ledger import DynamicEvidenceLedger
 from osiris_governance.models.claim import EpistemicStatus
 from osiris_governance.models.ledger import ClaimStatus, EvidencePlane, LedgerEventType, ViolationType
+
+AUTHORITY = PermitAuthority(b"k" * 32)
 
 
 def test_recompute_bitstring_counts_deterministic():
@@ -45,8 +48,8 @@ def test_recompute_continuous_samples():
 
 
 def test_verify_and_seal_exact_match():
-    verifier = ExternalVerifier(tolerance=1e-5)
-    ledger = DynamicEvidenceLedger(ledger_id="test-ledger-001")
+    verifier = ExternalVerifier(tolerance=1e-5, permit_authority=AUTHORITY)
+    ledger = DynamicEvidenceLedger(ledger_id="test-ledger-001", permit_authority=AUTHORITY)
     raw_pkg = RawDataPackage(
         raw_id="RAW-RUN-001",
         source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
@@ -81,8 +84,8 @@ def test_verify_and_seal_exact_match():
 
 
 def test_verify_and_seal_mismatch_demotes_to_refuted():
-    verifier = ExternalVerifier(tolerance=1e-5)
-    ledger = DynamicEvidenceLedger(ledger_id="test-ledger-002")
+    verifier = ExternalVerifier(tolerance=1e-5, permit_authority=AUTHORITY)
+    ledger = DynamicEvidenceLedger(ledger_id="test-ledger-002", permit_authority=AUTHORITY)
     raw_pkg = RawDataPackage(
         raw_id="RAW-RUN-002",
         source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
@@ -116,7 +119,7 @@ def test_verify_and_seal_mismatch_demotes_to_refuted():
 
 
 def test_verify_and_seal_metric_not_in_raw():
-    verifier = ExternalVerifier()
+    verifier = ExternalVerifier(permit_authority=AUTHORITY)
     raw_pkg = RawDataPackage(
         raw_id="RAW-RUN-003",
         source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
@@ -148,8 +151,8 @@ def test_document_claim_scanner_detects_unanchored_numbers():
 
 
 def test_document_claim_scanner_accepts_cited_evidence():
-    ledger = DynamicEvidenceLedger()
-    verifier = ExternalVerifier()
+    ledger = DynamicEvidenceLedger(permit_authority=AUTHORITY)
+    verifier = ExternalVerifier(permit_authority=AUTHORITY)
     raw_pkg = RawDataPackage(
         raw_id="RUN-101",
         source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
@@ -165,3 +168,26 @@ def test_document_claim_scanner_accepts_cited_evidence():
     report = audit_document_numerical_claims(doc_anchored, ledger=ledger)
     assert report.is_valid is True
     assert report.unanchored_findings == 0
+
+
+def test_record_to_ledger_requires_permit_authority():
+    pkg = RawDataPackage(raw_id="RAW-X", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
+                         provider_receipt_id=None, raw_payload={"counts": {"0": 10}}, captured_at_utc="2026-10-07T00:00:00Z")
+    unsigned = ExternalVerifier()
+    pack = unsigned.verify_and_seal(pkg, {"survival_fidelity": 1.0}, "CLM-X")
+    with pytest.raises(AuthorityGateError, match="NO_PERMIT_AUTHORITY"):
+        unsigned.record_to_ledger(DynamicEvidenceLedger(permit_authority=AUTHORITY), pack, "CLM-X", "s", "t")
+
+
+def test_batch_values_recomputed_from_raw():
+    v = ExternalVerifier()
+    counts = RawDataPackage(raw_id="A", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL, provider_receipt_id=None,
+                            raw_payload={"counts": {"00": 750, "11": 250}}, captured_at_utc="t", metadata={"target_state": "00"})
+    samples = RawDataPackage(raw_id="B", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL, provider_receipt_id=None,
+                             raw_payload={"samples": [1, 2.5]}, captured_at_utc="t")
+    neither = RawDataPackage(raw_id="C", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL, provider_receipt_id=None,
+                             raw_payload={"summary": 0.99}, captured_at_utc="t")
+    assert v.batch_values(counts) == [0.75]
+    assert v.batch_values(samples) == [1.0, 2.5]
+    with pytest.raises(EvidenceIntegrityError):
+        v.batch_values(neither)

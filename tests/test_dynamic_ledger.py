@@ -2,12 +2,16 @@
 
 import pytest
 
-from osiris_governance.contracts import AuthorityPermit, PROMOTION_SCOPE, VERIFICATION_SCOPE
+import dataclasses
+from datetime import datetime, timezone
+
+from osiris_governance.contracts import AuthorityPermit, PermitAuthority, PROMOTION_SCOPE, VERIFICATION_SCOPE
 from osiris_governance.errors import (
     AuthorityGateError,
     ExecutionBindingMismatch,
     GovernanceViolation,
     MutableReferenceError,
+    NonceReplayDetected,
     ScopeViolation,
 )
 from osiris_governance.ledger import DynamicEvidenceLedger
@@ -458,92 +462,102 @@ def test_partial_scope_sandbox_attestation_rejected(base_scope):
     assert len(complete_result.violations) == 0
 
 
-def test_privileged_event_without_permit_raises_authority_gate_error(base_scope):
-    """Unauthorized callers cannot directly record privileged promotion events."""
-    ledger = DynamicEvidenceLedger()
-
-    with pytest.raises(AuthorityGateError, match="requires an authenticated authority permit"):
-        ledger.record_event(
-            event_type=LedgerEventType.CHAMPION_PROMOTED,
-            plane=EvidencePlane.GOVERNANCE,
-            actor={"agent": "unauthorized_agent", "role": "PROPOSER"},
-            artifact={"champion_id": "malicious_v1"},
-            scope=base_scope,
-            payload={"metric": "0.999"},
-        )
+TEST_KEY = b"k" * 32
 
 
-def test_privileged_event_with_mismatched_permit_digest_raises_binding_mismatch(base_scope):
-    """Authority permit bound to a different target digest is rejected fail-closed."""
-    ledger = DynamicEvidenceLedger()
-    mismatched_permit = AuthorityPermit(
-        issuer="osiris.promotion.manager",
-        scope=PROMOTION_SCOPE,
-        target_digest="sha256:different_target_digest_00000000000000000000000000000000",
-        nonce="nonce-001",
-        issued_at_utc="2026-09-26T12:00:00Z",
-        expires_at_utc="2026-09-26T13:00:00Z",
-    )
-
-    with pytest.raises(ExecutionBindingMismatch, match="Authority permit digest mismatch"):
-        ledger.record_event(
-            event_type=LedgerEventType.CHAMPION_PROMOTED,
-            plane=EvidencePlane.GOVERNANCE,
-            actor={"agent": "osiris.promotion.manager", "role": "PROMOTION_AUTHORITY"},
-            artifact={"digest": base_scope.artifact_digest},
-            scope=base_scope,
-            payload={"metric": "0.999"},
-            authority_permit=mismatched_permit,
-        )
-
-
-def test_privileged_event_with_unauthorized_scope_raises_scope_violation(base_scope):
-    """Authority permit carrying invalid scope cannot authorize promotion."""
-    ledger = DynamicEvidenceLedger()
-    bad_scope_permit = AuthorityPermit(
-        issuer="osiris.promotion.manager",
-        scope="UNAUTHORIZED_ARBITRARY_SCOPE",
-        target_digest=base_scope.artifact_digest,
-        nonce="nonce-002",
-        issued_at_utc="2026-09-26T12:00:00Z",
-        expires_at_utc="2026-09-26T13:00:00Z",
-    )
-
-    with pytest.raises(ScopeViolation, match="Unauthorized authority permit scope"):
-        ledger.record_event(
-            event_type=LedgerEventType.CHAMPION_PROMOTED,
-            plane=EvidencePlane.GOVERNANCE,
-            actor={"agent": "osiris.promotion.manager", "role": "PROMOTION_AUTHORITY"},
-            artifact={"digest": base_scope.artifact_digest},
-            scope=base_scope,
-            payload={"metric": "0.999"},
-            authority_permit=bad_scope_permit,
-        )
-
-
-def test_privileged_event_with_valid_permit_succeeds(base_scope):
-    """Authenticated caller with matching permit successfully records privileged event."""
-    ledger = DynamicEvidenceLedger()
-    valid_permit = AuthorityPermit(
-        issuer="osiris.promotion.manager",
-        scope=PROMOTION_SCOPE,
-        target_digest=base_scope.artifact_digest,
-        nonce="nonce-003",
-        issued_at_utc="2026-09-26T12:00:00Z",
-        expires_at_utc="2026-09-26T13:00:00Z",
-    )
-
-    event = ledger.record_event(
+def _promote(ledger, scope, permit, digest=None):
+    return ledger.record_event(
         event_type=LedgerEventType.CHAMPION_PROMOTED,
         plane=EvidencePlane.GOVERNANCE,
         actor={"agent": "osiris.promotion.manager", "role": "PROMOTION_AUTHORITY"},
-        artifact={"digest": base_scope.artifact_digest},
-        scope=base_scope,
+        artifact={"digest": digest or scope.artifact_digest},
+        scope=scope,
         payload={"metric": "0.999"},
-        authority_permit=valid_permit,
+        authority_permit=permit,
     )
 
+
+def test_privileged_event_without_permit_raises_authority_gate_error(base_scope):
+    ledger = DynamicEvidenceLedger(permit_authority=PermitAuthority(TEST_KEY))
+    with pytest.raises(AuthorityGateError, match="requires an authenticated authority permit"):
+        _promote(ledger, base_scope, None)
+
+
+def test_ledger_without_permit_authority_rejects_privileged_events(base_scope):
+    signed = PermitAuthority(TEST_KEY).issue("osiris.promotion.manager", PROMOTION_SCOPE, base_scope.artifact_digest)
+    with pytest.raises(AuthorityGateError, match="NO_PERMIT_AUTHORITY"):
+        _promote(DynamicEvidenceLedger(), base_scope, signed)
+
+
+def test_self_minted_unsigned_permit_rejected(base_scope):
+    ledger = DynamicEvidenceLedger(permit_authority=PermitAuthority(TEST_KEY))
+    forged = AuthorityPermit(
+        issuer="unauthorized_agent", scope=PROMOTION_SCOPE, target_digest=base_scope.artifact_digest,
+        nonce="n", issued_at_utc="2000-01-01T00:00:00Z", expires_at_utc="2099-01-01T00:00:00Z",
+    )
+    with pytest.raises(AuthorityGateError, match="PERMIT_SIGNATURE_INVALID"):
+        _promote(ledger, base_scope, forged)
+
+
+def test_permit_signed_with_other_key_rejected(base_scope):
+    ledger = DynamicEvidenceLedger(permit_authority=PermitAuthority(TEST_KEY))
+    other = PermitAuthority(b"x" * 32).issue("agent", PROMOTION_SCOPE, base_scope.artifact_digest)
+    with pytest.raises(AuthorityGateError, match="PERMIT_SIGNATURE_INVALID"):
+        _promote(ledger, base_scope, other)
+
+
+def test_tampered_permit_target_rejected(base_scope):
+    authority = PermitAuthority(TEST_KEY)
+    ledger = DynamicEvidenceLedger(permit_authority=authority)
+    signed = authority.issue("osiris.promotion.manager", PROMOTION_SCOPE, "sha256:" + "ab" * 32)
+    tampered = dataclasses.replace(signed, target_digest=base_scope.artifact_digest)
+    with pytest.raises(AuthorityGateError, match="PERMIT_SIGNATURE_INVALID"):
+        _promote(ledger, base_scope, tampered)
+
+
+def test_expired_permit_rejected(base_scope):
+    authority = PermitAuthority(TEST_KEY)
+    ledger = DynamicEvidenceLedger(permit_authority=authority)
+    old = authority.issue("osiris.promotion.manager", PROMOTION_SCOPE, base_scope.artifact_digest,
+                          ttl_seconds=60, now=datetime(2000, 1, 1, tzinfo=timezone.utc))
+    with pytest.raises(AuthorityGateError, match="PERMIT_EXPIRED"):
+        _promote(ledger, base_scope, old)
+
+
+def test_empty_target_permit_cannot_be_issued():
+    with pytest.raises(ValueError, match="must not be empty"):
+        PermitAuthority(TEST_KEY).issue("agent", PROMOTION_SCOPE, "")
+
+
+def test_permit_nonce_replay_rejected(base_scope):
+    authority = PermitAuthority(TEST_KEY)
+    ledger = DynamicEvidenceLedger(permit_authority=authority)
+    permit = authority.issue("osiris.promotion.manager", PROMOTION_SCOPE, base_scope.artifact_digest)
+    _promote(ledger, base_scope, permit)
+    with pytest.raises(NonceReplayDetected):
+        _promote(ledger, base_scope, permit)
+
+
+def test_privileged_event_with_mismatched_permit_digest_raises_binding_mismatch(base_scope):
+    authority = PermitAuthority(TEST_KEY)
+    ledger = DynamicEvidenceLedger(permit_authority=authority)
+    permit = authority.issue("osiris.promotion.manager", PROMOTION_SCOPE, "sha256:" + "cd" * 32)
+    with pytest.raises(ExecutionBindingMismatch, match="Authority permit digest mismatch"):
+        _promote(ledger, base_scope, permit)
+
+
+def test_privileged_event_with_unauthorized_scope_raises_scope_violation(base_scope):
+    authority = PermitAuthority(TEST_KEY)
+    ledger = DynamicEvidenceLedger(permit_authority=authority)
+    permit = authority.issue("osiris.promotion.manager", "UNAUTHORIZED_ARBITRARY_SCOPE", base_scope.artifact_digest)
+    with pytest.raises(ScopeViolation, match="Unauthorized authority permit scope"):
+        _promote(ledger, base_scope, permit)
+
+
+def test_privileged_event_with_valid_permit_succeeds(base_scope):
+    authority = PermitAuthority(TEST_KEY)
+    ledger = DynamicEvidenceLedger(permit_authority=authority)
+    event = _promote(ledger, base_scope, authority.issue("osiris.promotion.manager", PROMOTION_SCOPE, base_scope.artifact_digest))
     assert event.event_type == LedgerEventType.CHAMPION_PROMOTED
     assert event.record_digest.startswith("sha256:")
     assert ledger.verify_chain_integrity() is True
-

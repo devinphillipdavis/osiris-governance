@@ -18,8 +18,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .canonical import canonical_sha256, canonicalize_json
-from .contracts import AuthorityPermit, VERIFICATION_SCOPE
-from .errors import EvidenceIntegrityError, GovernanceViolation
+from .contracts import PermitAuthority, VERIFICATION_SCOPE
+from .errors import AuthorityGateError, EvidenceIntegrityError, GovernanceViolation
 from .models.claim import ClaimRecord, EpistemicStatus, ReleaseRelevance
 from .models.evidence import EvidenceClass, EvidenceDomain, EvidenceRecord
 from .models.ledger import (
@@ -89,8 +89,28 @@ class VerifiedEvidencePack:
 class ExternalVerifier:
     """Deterministic Evaluator running outside the agent's write surface."""
 
-    def __init__(self, tolerance: float = DEFAULT_NUMERICAL_TOLERANCE):
+    def __init__(self, tolerance: float = DEFAULT_NUMERICAL_TOLERANCE,
+                 permit_authority: Optional[PermitAuthority] = None):
         self.tolerance = tolerance
+        self._permit_authority = permit_authority
+
+    def batch_values(self, raw_pkg: RawDataPackage) -> List[float]:
+        """The observations one raw package contributes to a promotion batch,
+        recomputed here rather than taken from the caller."""
+        payload = raw_pkg.raw_payload
+        if "counts" in payload:
+            counts = payload["counts"]
+            n_qubits = max((len(k) for k in counts), default=0)
+            target = raw_pkg.metadata.get("target_state", "0" * n_qubits)
+            return [self.recompute_survival_fidelity(counts, target)]
+        if "samples" in payload:
+            values = [float(x) for x in payload["samples"]]
+            if not values:
+                raise EvidenceIntegrityError(f"raw package {raw_pkg.raw_id} has no samples")
+            return values
+        raise EvidenceIntegrityError(
+            f"raw package {raw_pkg.raw_id} has neither 'counts' nor 'samples'; cannot form a promotion batch"
+        )
 
     # -------------------------------------------------------------------------
     # Deterministic Metric Recomputation
@@ -303,13 +323,12 @@ class ExternalVerifier:
         }
 
         # 1. Record raw data verification event with authenticated verifier permit
-        verifier_permit = AuthorityPermit(
+        if self._permit_authority is None:
+            raise AuthorityGateError("NO_PERMIT_AUTHORITY: ExternalVerifier needs a PermitAuthority to record verified evidence")
+        verifier_permit = self._permit_authority.issue(
             issuer="osiris.verifier.external",
             scope=VERIFICATION_SCOPE,
             target_digest=verified_pack.raw_digest,
-            nonce=f"nonce-v-{verified_pack.raw_id}",
-            issued_at_utc=verified_pack.evidence_record.captured_at_utc,
-            expires_at_utc="2099-12-31T23:59:59Z",
         )
         ledger.record_event(
             event_type=LedgerEventType.RAW_DATA_VERIFIED,

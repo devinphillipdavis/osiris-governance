@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .canonical import canonical_sha256, canonicalize_json
 from .candidate_router import EvaluatorConfinementGuard
-from .contracts import AuthorityPermit, PROMOTION_SCOPE
+from .contracts import PermitAuthority, PROMOTION_SCOPE
+from .errors import EvidenceIntegrityError
 from .evidence_verifier import ExternalVerifier, RawDataPackage, VerifiedEvidencePack
 from .ledger import DynamicEvidenceLedger
 from .models.ledger import (
@@ -84,6 +85,7 @@ class ChampionChallengerManager:
         self,
         initial_champion: ChampionState,
         ledger: DynamicEvidenceLedger,
+        permit_authority: PermitAuthority,
         stat_gate: Optional[StatisticalPromotionGate] = None,
         verifier: Optional[ExternalVerifier] = None,
         confinement_guard: Optional[EvaluatorConfinementGuard] = None,
@@ -93,8 +95,9 @@ class ChampionChallengerManager:
         self.active_champion = initial_champion
         self.champion_history: List[ChampionState] = [initial_champion]
         self.ledger = ledger
+        self.permit_authority = permit_authority
         self.stat_gate = stat_gate or StatisticalPromotionGate(alpha=0.05)
-        self.verifier = verifier or ExternalVerifier()
+        self.verifier = verifier or ExternalVerifier(permit_authority=permit_authority)
         self.confinement_guard = confinement_guard or EvaluatorConfinementGuard()
         self.physics_verifier = physics_verifier or PhysicsDetectabilityVerifier()
         self.rollback_tolerance = rollback_degradation_tolerance
@@ -106,8 +109,9 @@ class ChampionChallengerManager:
         source_code: Optional[str],
         raw_pkg: RawDataPackage,
         claimed_metrics: Mapping[str, float],
-        champion_heldout_batches: Sequence[Sequence[float]],
-        challenger_heldout_batches: Sequence[Sequence[float]],
+        champion_heldout_packages: Sequence[RawDataPackage],
+        challenger_heldout_packages: Sequence[RawDataPackage],
+        search_packages: Sequence[RawDataPackage],
         challenger_mutation_score: float,
         correctness_passes: bool = True,
         observable_evaluator: Optional[Any] = None,
@@ -201,10 +205,28 @@ class ChampionChallengerManager:
                 )
 
         # Stage 2: Statistical Promotion Gate (Out-of-sample)
+        # Batches are recomputed from raw packages here; held-out status is checked by package digest.
+        try:
+            champion_batches = [self.verifier.batch_values(p) for p in champion_heldout_packages]
+            challenger_batches = [self.verifier.batch_values(p) for p in challenger_heldout_packages]
+        except EvidenceIntegrityError as e:
+            return PromotionPipelineResult(
+                challenger_id=challenger_id,
+                promoted=False,
+                stage_confinement_passed=True,
+                stage_correctness_passed=True,
+                stage_integrity_passed=False,
+                stage_stats_passed=False,
+                stage_physics_passed=True,
+                stage_mutation_non_regression_passed=False,
+                reason_code="HELDOUT_RAW_DATA_INVALID",
+                message=str(e),
+            )
         stat_decision = self.stat_gate.evaluate_promotion(
-            champion_batches=champion_heldout_batches,
-            challenger_batches=challenger_heldout_batches,
-            is_fresh_heldout_verified=True,
+            champion_batches=champion_batches,
+            challenger_batches=challenger_batches,
+            search_batch_digests=[p.payload_digest() for p in search_packages],
+            heldout_batch_digests=[p.payload_digest() for p in list(champion_heldout_packages) + list(challenger_heldout_packages)],
         )
         if not stat_decision.promoted:
             return PromotionPipelineResult(
@@ -269,13 +291,10 @@ class ChampionChallengerManager:
             policy_ref="OSIRIS-SPEC-VERIF-015",
             authority_id="osiris.promotion.manager",
         )
-        promotion_permit = AuthorityPermit(
+        promotion_permit = self.permit_authority.issue(
             issuer="osiris.promotion.manager",
             scope=PROMOTION_SCOPE,
             target_digest=new_champion.artifact_digest,
-            nonce=f"nonce-p-{challenger_id}",
-            issued_at_utc=now_utc,
-            expires_at_utc="2099-12-31T23:59:59Z",
         )
         self.ledger.record_event(
             event_type=LedgerEventType.CHAMPION_PROMOTED,
@@ -352,13 +371,10 @@ class ChampionChallengerManager:
                 policy_ref="OSIRIS-SPEC-VERIF-015",
                 authority_id="osiris.rollback.watchdog",
             )
-            rollback_permit = AuthorityPermit(
+            rollback_permit = self.permit_authority.issue(
                 issuer="osiris.rollback.watchdog",
                 scope=PROMOTION_SCOPE,
                 target_digest=restored.artifact_digest,
-                nonce=f"nonce-rb-{restored.champion_id}-{now_utc}",
-                issued_at_utc=now_utc,
-                expires_at_utc="2099-12-31T23:59:59Z",
             )
             self.ledger.record_event(
                 event_type=LedgerEventType.CHAMPION_ROLLED_BACK,

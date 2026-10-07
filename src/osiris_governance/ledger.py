@@ -15,11 +15,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .canonical import canonical_sha256
-from .contracts import AuthorityPermit, PROMOTION_SCOPE, VERIFICATION_SCOPE
+from .contracts import AuthorityPermit, PermitAuthority, PROMOTION_SCOPE, VERIFICATION_SCOPE
 from .errors import (
     AuthorityGateError,
     ExecutionBindingMismatch,
     GovernanceViolation,
+    NonceReplayDetected,
     ProposalExpired,
     ScopeViolation,
 )
@@ -85,8 +86,10 @@ class ClaimEvaluationResult:
 class DynamicEvidenceLedger:
     """Tamper-evident, hash-chained ledger that tracks all claims and enforces non-substitution."""
 
-    def __init__(self, ledger_id: str = "ledger-001"):
+    def __init__(self, ledger_id: str = "ledger-001", permit_authority: Optional[PermitAuthority] = None):
         self.ledger_id = ledger_id
+        self._permit_authority = permit_authority
+        self._used_permit_nonces: Set[str] = set()
         self._events: List[LedgerEvent] = []
         self._events_by_id: Dict[str, LedgerEvent] = {}
         self._latest_digest: str = GENESIS_DIGEST
@@ -126,26 +129,35 @@ class DynamicEvidenceLedger:
                 raise AuthorityGateError(
                     f"UNAUTHORIZED_EVENT_APPEND: Privileged event type '{event_type.value}' requires an authenticated authority permit."
                 )
+            if self._permit_authority is None:
+                raise AuthorityGateError(
+                    f"NO_PERMIT_AUTHORITY: this ledger has no permit authority, so it cannot accept '{event_type.value}'."
+                )
+            if not isinstance(authority_permit, AuthorityPermit):
+                raise AuthorityGateError("PERMIT_TYPE_INVALID: authority_permit must be an AuthorityPermit")
+            problem = self._permit_authority.check(authority_permit)
+            if problem:
+                raise AuthorityGateError(f"{problem}: permit rejected for '{event_type.value}'")
+            if authority_permit.nonce in self._used_permit_nonces:
+                raise NonceReplayDetected(f"Permit nonce '{authority_permit.nonce}' has already been used on this ledger")
 
             permitted_scopes = {
-                LedgerEventType.CHAMPION_PROMOTED: {PROMOTION_SCOPE, "PROMOTION_AUTHORITY"},
-                LedgerEventType.CHAMPION_ROLLED_BACK: {PROMOTION_SCOPE, "PROMOTION_AUTHORITY", "AUTOMATED_ROLLBACK"},
-                LedgerEventType.PROMOTION_EVALUATED: {PROMOTION_SCOPE, "PROMOTION_AUTHORITY"},
-                LedgerEventType.RAW_DATA_VERIFIED: {VERIFICATION_SCOPE, "DETERMINISTIC_VERIFICATION_SEALED"},
+                LedgerEventType.CHAMPION_PROMOTED: {PROMOTION_SCOPE},
+                LedgerEventType.CHAMPION_ROLLED_BACK: {PROMOTION_SCOPE},
+                LedgerEventType.PROMOTION_EVALUATED: {PROMOTION_SCOPE},
+                LedgerEventType.RAW_DATA_VERIFIED: {VERIFICATION_SCOPE},
             }.get(event_type, set())
-
-            permit_scope = getattr(authority_permit, "scope", "")
-            if permit_scope not in permitted_scopes:
+            if authority_permit.scope not in permitted_scopes:
                 raise ScopeViolation(
-                    f"Unauthorized authority permit scope '{permit_scope}' for privileged event '{event_type.value}'"
+                    f"Unauthorized authority permit scope '{authority_permit.scope}' for privileged event '{event_type.value}'"
                 )
 
-            target_digest = getattr(authority_permit, "target_digest", getattr(authority_permit, "proposal_sha256", None))
             expected_digest = artifact.get("digest") or artifact.get("raw_id") or scope.artifact_digest
-            if target_digest and expected_digest and target_digest != expected_digest:
+            if not expected_digest or authority_permit.target_digest != expected_digest:
                 raise ExecutionBindingMismatch(
-                    f"Authority permit digest mismatch: permit target '{target_digest}' != artifact '{expected_digest}'"
+                    f"Authority permit digest mismatch: permit target '{authority_permit.target_digest}' != artifact '{expected_digest}'"
                 )
+            self._used_permit_nonces.add(authority_permit.nonce)
 
         if event_id is None:
             seq = len(self._events) + 1

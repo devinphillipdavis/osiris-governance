@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .canonical import canonical_sha256, canonicalize_json
 from .errors import StatisticalGateError
@@ -58,6 +58,11 @@ class AASimulationReport:
             "passed": self.passed,
         }
         return canonical_sha256(canonicalize_json(data))
+
+
+def batch_digest(batch: Sequence[float]) -> str:
+    """Content digest of one batch of observations (exact float repr)."""
+    return canonical_sha256(canonicalize_json([repr(float(x)) for x in batch]))
 
 
 def hierarchical_cluster_bootstrap_ci(
@@ -142,17 +147,29 @@ class StatisticalPromotionGate:
         self,
         champion_batches: Sequence[Sequence[float]],
         challenger_batches: Sequence[Sequence[float]],
-        is_fresh_heldout_verified: bool,
+        search_batch_digests: Collection[str],
+        heldout_batch_digests: Optional[Sequence[str]] = None,
     ) -> PromotionDecision:
-        """Adjudicates whether challenger beats champion.
-        
-        Fail-Closed Invariants:
-        1. Winner's Curse Invariant: Must be fresh held-out evaluation (is_fresh_heldout_verified=True).
-        2. Pseudo-Replication Invariant: Must satisfy min_batches.
-        3. Statistical Significance: Lower bound of bootstrap CI must exceed MDE.
+        """Adjudicates whether challenger beats champion on held-out batches.
+
+        Held-out status is established from data, not asserted: the caller must
+        supply the digests of every batch the search saw, and no held-out batch
+        may share a digest with them.
+        heldout_batch_digests defaults to the content digests of the batches;
+        pass raw-package digests when the batches were derived from them.
         """
-        # 1. Anti-Winner's-Curse Check (Failure 2)
-        if not is_fresh_heldout_verified:
+        heldout = list(heldout_batch_digests) if heldout_batch_digests is not None else [
+            batch_digest(b) for b in list(champion_batches) + list(challenger_batches)
+        ]
+        search = set(search_batch_digests)
+        problem = None
+        if not search:
+            problem = ("NO_SEARCH_RECORD", "Promotion blocked: no search-batch digests supplied, so held-out status cannot be checked.")
+        elif len(heldout) != len(champion_batches) + len(challenger_batches):
+            problem = ("HELDOUT_DIGESTS_INCOMPLETE", "Promotion blocked: one digest is required per held-out batch.")
+        elif search.intersection(heldout):
+            problem = ("HELDOUT_OVERLAPS_SEARCH", f"Promotion blocked: {len(search.intersection(heldout))} held-out batch(es) were also used in search.")
+        if problem:
             return PromotionDecision(
                 promoted=False,
                 challenger_median=0.0,
@@ -163,8 +180,8 @@ class StatisticalPromotionGate:
                 confidence_level=self.confidence_level,
                 replicates_evaluated=0,
                 batches_evaluated=0,
-                reason_code="WINNERS_CURSE_BLOCKED",
-                message="Promotion blocked: in-search selection score cannot be reused for promotion. Fresh held-out verification required.",
+                reason_code=f"WINNERS_CURSE_BLOCKED:{problem[0]}",
+                message=problem[1],
                 details={"violation": ViolationType.WINNERS_CURSE_DETECTED.value},
             )
 
@@ -255,14 +272,15 @@ class StatisticalPromotionGate:
         false_positives = 0
         for i in range(n_simulations):
             # Generate two independent arms from the identical null distribution
-            arm_a = null_generator(seed=i * 2)
-            arm_b = null_generator(seed=i * 2 + 1)
+            arm_a = null_generator(seed=i * 3)
+            arm_b = null_generator(seed=i * 3 + 1)
+            search = null_generator(seed=i * 3 + 2)
 
             # Evaluate promotion under the gate
             decision = self.evaluate_promotion(
                 champion_batches=arm_a,
                 challenger_batches=arm_b,
-                is_fresh_heldout_verified=True,
+                search_batch_digests=[batch_digest(b) for b in search],
             )
             if decision.promoted:
                 false_positives += 1

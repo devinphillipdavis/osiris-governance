@@ -7,15 +7,28 @@ from osiris_governance.champion_challenger import (
     PromotionPipelineResult,
     RollbackEventResult,
 )
+from osiris_governance.contracts import PermitAuthority
 from osiris_governance.evidence_verifier import ExternalVerifier, RawDataPackage
 from osiris_governance.ledger import DynamicEvidenceLedger
 from osiris_governance.models.ledger import EvidencePlane, LedgerEventType
 from osiris_governance.stat_gate import StatisticalPromotionGate
 
 
+AUTHORITY = PermitAuthority(b"k" * 32)
+
+
+def pkgs(prefix, batches):
+    return [RawDataPackage(raw_id=f"{prefix}-{i}", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
+                           provider_receipt_id=None, raw_payload={"samples": list(b)},
+                           captured_at_utc="2026-10-07T07:00:00Z") for i, b in enumerate(batches)]
+
+
+SEARCH = pkgs("SEARCH", [[0.5, 0.6, 0.7]])
+
+
 @pytest.fixture
 def test_setup():
-    ledger = DynamicEvidenceLedger(ledger_id="test-promotion-ledger")
+    ledger = DynamicEvidenceLedger(ledger_id="test-promotion-ledger", permit_authority=AUTHORITY)
     initial_champ = ChampionState(
         champion_id="CHAMP-001",
         artifact_digest="sha256:0000000000000000000000000000000000000000000000000000000000000001",
@@ -27,6 +40,7 @@ def test_setup():
     manager = ChampionChallengerManager(
         initial_champion=initial_champ,
         ledger=ledger,
+        permit_authority=AUTHORITY,
         stat_gate=stat_gate,
         rollback_degradation_tolerance=0.10,  # 10% tolerance floor
     )
@@ -68,8 +82,9 @@ def test_full_pipeline_successful_promotion(test_setup):
         source_code="def optimize(): return 42\n",
         raw_pkg=raw_pkg,
         claimed_metrics=claimed,
-        champion_heldout_batches=champ_batches,
-        challenger_heldout_batches=chall_batches,
+        champion_heldout_packages=pkgs("CHAMP", champ_batches),
+        challenger_heldout_packages=pkgs("CHALL", chall_batches),
+        search_packages=SEARCH,
         challenger_mutation_score=0.85,  # Higher than champion's 0.80
         correctness_passes=True,
     )
@@ -108,8 +123,9 @@ def test_promotion_rejected_on_mutation_score_regression(test_setup):
         source_code=None,
         raw_pkg=raw_pkg,
         claimed_metrics=claimed,
-        champion_heldout_batches=champ_batches,
-        challenger_heldout_batches=chall_batches,
+        champion_heldout_packages=pkgs("CHAMP", champ_batches),
+        challenger_heldout_packages=pkgs("CHALL", chall_batches),
+        search_packages=SEARCH,
         challenger_mutation_score=0.70,
         correctness_passes=True,
     )
@@ -143,8 +159,9 @@ def test_promotion_rejected_on_evidence_integrity_mismatch(test_setup):
         source_code=None,
         raw_pkg=raw_pkg,
         claimed_metrics=claimed,
-        champion_heldout_batches=champ_batches,
-        challenger_heldout_batches=chall_batches,
+        champion_heldout_packages=pkgs("CHAMP", champ_batches),
+        challenger_heldout_packages=pkgs("CHALL", chall_batches),
+        search_packages=SEARCH,
         challenger_mutation_score=0.90,
         correctness_passes=True,
     )
@@ -174,8 +191,9 @@ def test_post_promotion_automated_rollback(test_setup):
         source_code=None,
         raw_pkg=raw_pkg,
         claimed_metrics={"survival_fidelity": 0.90},
-        champion_heldout_batches=champ_batches,
-        challenger_heldout_batches=chall_batches,
+        champion_heldout_packages=pkgs("CHAMP", champ_batches),
+        challenger_heldout_packages=pkgs("CHALL", chall_batches),
+        search_packages=SEARCH,
         challenger_mutation_score=0.85,
     )
     assert res.promoted is True
@@ -193,9 +211,49 @@ def test_post_promotion_automated_rollback(test_setup):
     assert rollback_res.quarantined_champion_id == "CHALL-005"
     assert rollback_res.restored_champion_id == "CHAMP-001"
     assert manager.active_champion.champion_id == "CHAMP-001"
+    assert manager.active_champion.artifact_digest == initial_champ.artifact_digest
+    assert manager.active_champion is initial_champ
 
     # Check ledger event
     rb_events = [e for e in ledger.events if e.event_type == LedgerEventType.CHAMPION_ROLLED_BACK]
     assert len(rb_events) == 1
     assert rb_events[0].payload["quarantined_champion_id"] == "CHALL-005"
     assert rb_events[0].payload["restored_champion_id"] == "CHAMP-001"
+
+
+def test_promotion_blocked_when_heldout_package_was_used_in_search(test_setup):
+    manager, ledger, _ = test_setup
+    raw_pkg = RawDataPackage(raw_id="RAW-6", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL, provider_receipt_id=None,
+                             raw_payload={"counts": {"00": 900, "11": 100}}, captured_at_utc="2026-10-07T07:10:00Z",
+                             metadata={"target_state": "00"})
+    chall = pkgs("CHALL", [[1.3 + i / 100] * 3 for i in range(5)])
+    result = manager.evaluate_and_promote(
+        challenger_id="CHALL-006", patch_diff=None, source_code=None, raw_pkg=raw_pkg,
+        claimed_metrics={"survival_fidelity": 0.90},
+        champion_heldout_packages=pkgs("CHAMP", [[1.0 + i / 100] * 3 for i in range(5)]),
+        challenger_heldout_packages=chall,
+        search_packages=[chall[0]],
+        challenger_mutation_score=0.85,
+    )
+    assert result.promoted is False
+    assert result.reason_code == "WINNERS_CURSE_BLOCKED:HELDOUT_OVERLAPS_SEARCH"
+    assert not [e for e in ledger.events if e.event_type == LedgerEventType.CHAMPION_PROMOTED]
+
+
+def test_promotion_blocked_when_heldout_has_no_raw_data(test_setup):
+    manager, _, _ = test_setup
+    raw_pkg = RawDataPackage(raw_id="RAW-7", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL, provider_receipt_id=None,
+                             raw_payload={"counts": {"00": 900, "11": 100}}, captured_at_utc="2026-10-07T07:10:00Z",
+                             metadata={"target_state": "00"})
+    summary_only = [RawDataPackage(raw_id=f"S-{i}", source_plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL, provider_receipt_id=None,
+                                   raw_payload={"median": 1.5}, captured_at_utc="t") for i in range(5)]
+    result = manager.evaluate_and_promote(
+        challenger_id="CHALL-007", patch_diff=None, source_code=None, raw_pkg=raw_pkg,
+        claimed_metrics={"survival_fidelity": 0.90},
+        champion_heldout_packages=pkgs("CHAMP", [[1.0] * 3] * 5),
+        challenger_heldout_packages=summary_only,
+        search_packages=SEARCH,
+        challenger_mutation_score=0.85,
+    )
+    assert result.promoted is False
+    assert result.reason_code == "HELDOUT_RAW_DATA_INVALID"

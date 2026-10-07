@@ -7,19 +7,29 @@ from osiris_governance.stat_gate import (
     AASimulationReport,
     PromotionDecision,
     StatisticalPromotionGate,
+    batch_digest,
     hierarchical_cluster_bootstrap_ci,
 )
 
+SEARCH = [batch_digest([0.5, 0.6])]
 
-def test_winners_curse_blocked_without_split_sample():
+
+def test_winners_curse_blocked_when_heldout_reuses_search_batch():
     gate = StatisticalPromotionGate(alpha=0.05, mde=0.01)
     champ = [[1.0, 1.1], [1.0, 1.2], [1.1, 1.1], [1.0, 1.0], [1.1, 1.2]]
     chall = [[1.5, 1.6], [1.5, 1.7], [1.6, 1.5], [1.5, 1.6], [1.6, 1.6]]
-
-    # If is_fresh_heldout_verified is False (in-search data used for promotion)
-    decision = gate.evaluate_promotion(champ, chall, is_fresh_heldout_verified=False)
+    search = [batch_digest(b) for b in chall[:1]]  # selection saw one of the "held-out" batches
+    decision = gate.evaluate_promotion(champ, chall, search_batch_digests=search)
     assert decision.promoted is False
-    assert decision.reason_code == "WINNERS_CURSE_BLOCKED"
+    assert decision.reason_code == "WINNERS_CURSE_BLOCKED:HELDOUT_OVERLAPS_SEARCH"
+
+
+def test_winners_curse_blocked_without_search_record():
+    gate = StatisticalPromotionGate(alpha=0.05, mde=0.01)
+    champ = [[1.0, 1.1]] * 5
+    chall = [[1.5, 1.6], [1.5, 1.7], [1.6, 1.5], [1.5, 1.6], [1.6, 1.6]]
+    decision = gate.evaluate_promotion(champ, chall, search_batch_digests=[])
+    assert decision.reason_code == "WINNERS_CURSE_BLOCKED:NO_SEARCH_RECORD"
 
 
 def test_pseudo_replication_blocked_with_insufficient_batches():
@@ -28,7 +38,7 @@ def test_pseudo_replication_blocked_with_insufficient_batches():
     champ = [[1.0, 1.1, 1.0, 1.2], [1.1, 1.1, 1.0, 1.0]]
     chall = [[1.5, 1.6, 1.5, 1.7], [1.6, 1.5, 1.5, 1.6]]
 
-    decision = gate.evaluate_promotion(champ, chall, is_fresh_heldout_verified=True)
+    decision = gate.evaluate_promotion(champ, chall, search_batch_digests=SEARCH)
     assert decision.promoted is False
     assert decision.reason_code == "PSEUDO_REPLICATION_BLOCKED"
 
@@ -51,7 +61,7 @@ def test_genuine_superiority_promoted():
         [1.29, 1.31, 1.28],
     ]
 
-    decision = gate.evaluate_promotion(champ, chall, is_fresh_heldout_verified=True)
+    decision = gate.evaluate_promotion(champ, chall, search_batch_digests=SEARCH)
     assert decision.promoted is True
     assert decision.reason_code == "PROMOTION_STATISTICALLY_CONFIRMED"
     assert decision.ci_lower > 0.05
@@ -76,7 +86,7 @@ def test_noise_only_difference_rejected():
         [0.99, 1.01],
     ]
 
-    decision = gate.evaluate_promotion(champ, chall, is_fresh_heldout_verified=True)
+    decision = gate.evaluate_promotion(champ, chall, search_batch_digests=SEARCH)
     assert decision.promoted is False
     assert decision.reason_code == "INSUFFICIENT_STATISTICAL_SEPARATION"
 

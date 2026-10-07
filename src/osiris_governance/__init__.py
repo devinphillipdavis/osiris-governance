@@ -23,6 +23,7 @@ from .contracts import (
     VERIFICATION_SCOPE,
     ActionProposal,
     AuthorityPermit,
+    PermitAuthority,
     ReplayExecutionPermit,
     ReplayResultRecord,
 )
@@ -83,6 +84,7 @@ from .stat_gate import (
     AASimulationReport,
     PromotionDecision,
     StatisticalPromotionGate,
+    batch_digest,
     hierarchical_cluster_bootstrap_ci,
 )
 from .physics_checks import (
@@ -186,7 +188,9 @@ __all__ = [
     "AASimulationReport",
     "PromotionDecision",
     "StatisticalPromotionGate",
+    "batch_digest",
     "hierarchical_cluster_bootstrap_ci",
+    "PermitAuthority",
     "DetectabilityAuditResult",
     "InvarianceAuditResult",
     "NoiselessBaselineAuditResult",
