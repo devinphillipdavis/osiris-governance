@@ -87,3 +87,20 @@ class ReplayResultRecord:
     payload: Mapping[str, Any]
     executed_at_utc: str
     raw_payload_sha256: str = ""
+
+
+PROMOTION_SCOPE = "PROMOTION_AUTHORITY_VERIFIED"
+VERIFICATION_SCOPE = "DETERMINISTIC_VERIFICATION_SEALED"
+
+
+@dataclass(frozen=True)
+class AuthorityPermit:
+    """Cryptographic/Deterministic authority token authorizing privileged ledger state transitions."""
+    issuer: str
+    scope: str
+    target_digest: str
+    nonce: str
+    issued_at_utc: str
+    expires_at_utc: str
+    policy_version: str = "OSIRIS-SPEC-VERIF-015"
+

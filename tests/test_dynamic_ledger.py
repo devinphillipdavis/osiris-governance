@@ -2,7 +2,14 @@
 
 import pytest
 
-from osiris_governance.errors import GovernanceViolation, MutableReferenceError
+from osiris_governance.contracts import AuthorityPermit, PROMOTION_SCOPE, VERIFICATION_SCOPE
+from osiris_governance.errors import (
+    AuthorityGateError,
+    ExecutionBindingMismatch,
+    GovernanceViolation,
+    MutableReferenceError,
+    ScopeViolation,
+)
 from osiris_governance.ledger import DynamicEvidenceLedger
 from osiris_governance.models.ledger import (
     ClaimStatus,
@@ -449,3 +456,94 @@ def test_partial_scope_sandbox_attestation_rejected(base_scope):
 
     assert complete_result.status == ClaimStatus.TRUE
     assert len(complete_result.violations) == 0
+
+
+def test_privileged_event_without_permit_raises_authority_gate_error(base_scope):
+    """Unauthorized callers cannot directly record privileged promotion events."""
+    ledger = DynamicEvidenceLedger()
+
+    with pytest.raises(AuthorityGateError, match="requires an authenticated authority permit"):
+        ledger.record_event(
+            event_type=LedgerEventType.CHAMPION_PROMOTED,
+            plane=EvidencePlane.GOVERNANCE,
+            actor={"agent": "unauthorized_agent", "role": "PROPOSER"},
+            artifact={"champion_id": "malicious_v1"},
+            scope=base_scope,
+            payload={"metric": "0.999"},
+        )
+
+
+def test_privileged_event_with_mismatched_permit_digest_raises_binding_mismatch(base_scope):
+    """Authority permit bound to a different target digest is rejected fail-closed."""
+    ledger = DynamicEvidenceLedger()
+    mismatched_permit = AuthorityPermit(
+        issuer="osiris.promotion.manager",
+        scope=PROMOTION_SCOPE,
+        target_digest="sha256:different_target_digest_00000000000000000000000000000000",
+        nonce="nonce-001",
+        issued_at_utc="2026-09-26T12:00:00Z",
+        expires_at_utc="2026-09-26T13:00:00Z",
+    )
+
+    with pytest.raises(ExecutionBindingMismatch, match="Authority permit digest mismatch"):
+        ledger.record_event(
+            event_type=LedgerEventType.CHAMPION_PROMOTED,
+            plane=EvidencePlane.GOVERNANCE,
+            actor={"agent": "osiris.promotion.manager", "role": "PROMOTION_AUTHORITY"},
+            artifact={"digest": base_scope.artifact_digest},
+            scope=base_scope,
+            payload={"metric": "0.999"},
+            authority_permit=mismatched_permit,
+        )
+
+
+def test_privileged_event_with_unauthorized_scope_raises_scope_violation(base_scope):
+    """Authority permit carrying invalid scope cannot authorize promotion."""
+    ledger = DynamicEvidenceLedger()
+    bad_scope_permit = AuthorityPermit(
+        issuer="osiris.promotion.manager",
+        scope="UNAUTHORIZED_ARBITRARY_SCOPE",
+        target_digest=base_scope.artifact_digest,
+        nonce="nonce-002",
+        issued_at_utc="2026-09-26T12:00:00Z",
+        expires_at_utc="2026-09-26T13:00:00Z",
+    )
+
+    with pytest.raises(ScopeViolation, match="Unauthorized authority permit scope"):
+        ledger.record_event(
+            event_type=LedgerEventType.CHAMPION_PROMOTED,
+            plane=EvidencePlane.GOVERNANCE,
+            actor={"agent": "osiris.promotion.manager", "role": "PROMOTION_AUTHORITY"},
+            artifact={"digest": base_scope.artifact_digest},
+            scope=base_scope,
+            payload={"metric": "0.999"},
+            authority_permit=bad_scope_permit,
+        )
+
+
+def test_privileged_event_with_valid_permit_succeeds(base_scope):
+    """Authenticated caller with matching permit successfully records privileged event."""
+    ledger = DynamicEvidenceLedger()
+    valid_permit = AuthorityPermit(
+        issuer="osiris.promotion.manager",
+        scope=PROMOTION_SCOPE,
+        target_digest=base_scope.artifact_digest,
+        nonce="nonce-003",
+        issued_at_utc="2026-09-26T12:00:00Z",
+        expires_at_utc="2026-09-26T13:00:00Z",
+    )
+
+    event = ledger.record_event(
+        event_type=LedgerEventType.CHAMPION_PROMOTED,
+        plane=EvidencePlane.GOVERNANCE,
+        actor={"agent": "osiris.promotion.manager", "role": "PROMOTION_AUTHORITY"},
+        artifact={"digest": base_scope.artifact_digest},
+        scope=base_scope,
+        payload={"metric": "0.999"},
+        authority_permit=valid_permit,
+    )
+
+    assert event.event_type == LedgerEventType.CHAMPION_PROMOTED
+    assert event.record_digest.startswith("sha256:")
+    assert ledger.verify_chain_integrity() is True
+

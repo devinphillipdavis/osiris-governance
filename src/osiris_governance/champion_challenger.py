@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .canonical import canonical_sha256, canonicalize_json
 from .candidate_router import EvaluatorConfinementGuard
+from .contracts import AuthorityPermit, PROMOTION_SCOPE
 from .evidence_verifier import ExternalVerifier, RawDataPackage, VerifiedEvidencePack
 from .ledger import DynamicEvidenceLedger
 from .models.ledger import (
@@ -268,6 +269,14 @@ class ChampionChallengerManager:
             policy_ref="OSIRIS-SPEC-VERIF-015",
             authority_id="osiris.promotion.manager",
         )
+        promotion_permit = AuthorityPermit(
+            issuer="osiris.promotion.manager",
+            scope=PROMOTION_SCOPE,
+            target_digest=new_champion.artifact_digest,
+            nonce=f"nonce-p-{challenger_id}",
+            issued_at_utc=now_utc,
+            expires_at_utc="2099-12-31T23:59:59Z",
+        )
         self.ledger.record_event(
             event_type=LedgerEventType.CHAMPION_PROMOTED,
             plane=EvidencePlane.GOVERNANCE,
@@ -280,6 +289,7 @@ class ChampionChallengerManager:
                 "delta_median": f"{stat_decision.delta_median:.6f}",
                 "mutation_score": f"{challenger_mutation_score:.6f}",
             },
+            authority_permit=promotion_permit,
             evidence_refs=[verified_pack.evidence_record.evidence_id],
         )
 
@@ -342,6 +352,14 @@ class ChampionChallengerManager:
                 policy_ref="OSIRIS-SPEC-VERIF-015",
                 authority_id="osiris.rollback.watchdog",
             )
+            rollback_permit = AuthorityPermit(
+                issuer="osiris.rollback.watchdog",
+                scope=PROMOTION_SCOPE,
+                target_digest=restored.artifact_digest,
+                nonce=f"nonce-rb-{restored.champion_id}-{now_utc}",
+                issued_at_utc=now_utc,
+                expires_at_utc="2099-12-31T23:59:59Z",
+            )
             self.ledger.record_event(
                 event_type=LedgerEventType.CHAMPION_ROLLED_BACK,
                 plane=EvidencePlane.GOVERNANCE,
@@ -355,6 +373,7 @@ class ChampionChallengerManager:
                     "rollback_threshold": f"{threshold:.6f}",
                     "reason": "POST_PROMOTION_DEGRADATION",
                 },
+                authority_permit=rollback_permit,
             )
 
             msg = (

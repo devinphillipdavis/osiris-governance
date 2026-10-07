@@ -15,7 +15,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .canonical import canonical_sha256
-from .errors import GovernanceViolation
+from .contracts import AuthorityPermit, PROMOTION_SCOPE, VERIFICATION_SCOPE
+from .errors import (
+    AuthorityGateError,
+    ExecutionBindingMismatch,
+    GovernanceViolation,
+    ProposalExpired,
+    ScopeViolation,
+)
 from .models.ledger import (
     ClaimStatus,
     ClaimType,
@@ -52,6 +59,14 @@ PERMITTED_PLANES_BY_CLAIM_TYPE: Dict[ClaimType, Set[EvidencePlane]] = {
         EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
         EvidencePlane.GOVERNANCE,
     },
+}
+
+
+PRIVILEGED_EVENT_TYPES: Set[LedgerEventType] = {
+    LedgerEventType.CHAMPION_PROMOTED,
+    LedgerEventType.CHAMPION_ROLLED_BACK,
+    LedgerEventType.RAW_DATA_VERIFIED,
+    LedgerEventType.PROMOTION_EVALUATED,
 }
 
 
@@ -96,6 +111,7 @@ class DynamicEvidenceLedger:
         artifact: Dict[str, str],
         scope: ScopeBinding,
         payload: Dict[str, Any],
+        authority_permit: Optional[Any] = None,
         evidence_refs: Optional[List[str]] = None,
         event_id: Optional[str] = None,
         recorded_at: Optional[str] = None,
@@ -103,6 +119,34 @@ class DynamicEvidenceLedger:
         """Appends a new event to the ledger, computing its canonical hash and chaining to predecessor."""
         if recorded_at is None:
             recorded_at = datetime.now(timezone.utc).isoformat()
+
+        # Fail-closed Authority Gating for Privileged Lifecycle Events
+        if event_type in PRIVILEGED_EVENT_TYPES:
+            if authority_permit is None:
+                raise AuthorityGateError(
+                    f"UNAUTHORIZED_EVENT_APPEND: Privileged event type '{event_type.value}' requires an authenticated authority permit."
+                )
+
+            permitted_scopes = {
+                LedgerEventType.CHAMPION_PROMOTED: {PROMOTION_SCOPE, "PROMOTION_AUTHORITY"},
+                LedgerEventType.CHAMPION_ROLLED_BACK: {PROMOTION_SCOPE, "PROMOTION_AUTHORITY", "AUTOMATED_ROLLBACK"},
+                LedgerEventType.PROMOTION_EVALUATED: {PROMOTION_SCOPE, "PROMOTION_AUTHORITY"},
+                LedgerEventType.RAW_DATA_VERIFIED: {VERIFICATION_SCOPE, "DETERMINISTIC_VERIFICATION_SEALED"},
+            }.get(event_type, set())
+
+            permit_scope = getattr(authority_permit, "scope", "")
+            if permit_scope not in permitted_scopes:
+                raise ScopeViolation(
+                    f"Unauthorized authority permit scope '{permit_scope}' for privileged event '{event_type.value}'"
+                )
+
+            target_digest = getattr(authority_permit, "target_digest", getattr(authority_permit, "proposal_sha256", None))
+            expected_digest = artifact.get("digest") or artifact.get("raw_id") or scope.artifact_digest
+            if target_digest and expected_digest and target_digest != expected_digest:
+                raise ExecutionBindingMismatch(
+                    f"Authority permit digest mismatch: permit target '{target_digest}' != artifact '{expected_digest}'"
+                )
+
         if event_id is None:
             seq = len(self._events) + 1
             event_id = f"evt-{seq:06d}"

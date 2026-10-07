@@ -68,7 +68,7 @@ class EvaluatorConfinementGuard:
         self.protected_prefixes = tuple(protected_prefixes)
         self.forbidden_calls = forbidden_calls
 
-    def audit_patch_paths(self, patch_diff: str) -> ScreeningResult:
+    def audit_patch_paths(self, patch_diff: str, candidate_id: str = "PATCH-PROPOSAL") -> ScreeningResult:
         """Inspects diff headers to verify candidate does not modify protected evaluator files."""
         touched_files: List[str] = []
         for line in patch_diff.splitlines():
@@ -84,7 +84,7 @@ class EvaluatorConfinementGuard:
             for pattern in self.protected_prefixes:
                 if pattern in filepath:
                     return ScreeningResult(
-                        candidate_id="PATCH-PROPOSAL",
+                        candidate_id=candidate_id,
                         is_admissible=False,
                         reason_code="EVALUATOR_INTEGRITY_COMPROMISED",
                         message=(
@@ -95,7 +95,7 @@ class EvaluatorConfinementGuard:
                     )
 
         return ScreeningResult(
-            candidate_id="PATCH-PROPOSAL",
+            candidate_id=candidate_id,
             is_admissible=True,
             reason_code="CONFINEMENT_PASSED",
             message="Patch adheres to evaluator confinement boundaries.",

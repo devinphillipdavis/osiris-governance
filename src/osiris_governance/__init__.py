@@ -19,7 +19,10 @@ from .contracts import (
     REPLAY_ACTION_KIND,
     REPLAY_CAPABILITY,
     REPLAY_SCOPE,
+    PROMOTION_SCOPE,
+    VERIFICATION_SCOPE,
     ActionProposal,
+    AuthorityPermit,
     ReplayExecutionPermit,
     ReplayResultRecord,
 )
@@ -127,7 +130,7 @@ from .models import (
     ViolationType,
     resolve_status_precedence,
 )
-from .ledger import ClaimEvaluationResult, DynamicEvidenceLedger
+from .ledger import ClaimEvaluationResult, DynamicEvidenceLedger, PRIVILEGED_EVENT_TYPES
 from .replay import ReplayAdapter
 
 __version__ = "0.2.0"

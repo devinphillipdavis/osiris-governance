@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .canonical import canonical_sha256, canonicalize_json
+from .contracts import AuthorityPermit, VERIFICATION_SCOPE
 from .errors import EvidenceIntegrityError, GovernanceViolation
 from .models.claim import ClaimRecord, EpistemicStatus, ReleaseRelevance
 from .models.evidence import EvidenceClass, EvidenceDomain, EvidenceRecord
@@ -301,7 +302,15 @@ class ExternalVerifier:
             for k, v in verified_pack.recomputed_metrics.items()
         }
 
-        # 1. Record raw data verification event
+        # 1. Record raw data verification event with authenticated verifier permit
+        verifier_permit = AuthorityPermit(
+            issuer="osiris.verifier.external",
+            scope=VERIFICATION_SCOPE,
+            target_digest=verified_pack.raw_digest,
+            nonce=f"nonce-v-{verified_pack.raw_id}",
+            issued_at_utc=verified_pack.evidence_record.captured_at_utc,
+            expires_at_utc="2099-12-31T23:59:59Z",
+        )
         ledger.record_event(
             event_type=LedgerEventType.RAW_DATA_VERIFIED,
             plane=EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
@@ -313,6 +322,7 @@ class ExternalVerifier:
                 "recomputed_metrics": canonical_metrics,
                 "all_matched": verified_pack.all_matched,
             },
+            authority_permit=verifier_permit,
         )
 
         # 2. Record sealed evidence
