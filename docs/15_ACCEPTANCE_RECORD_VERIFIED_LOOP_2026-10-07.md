@@ -134,3 +134,30 @@ Scripts are in the auditor's scratchpad:
 - `mismatch.py`: hyp-1 replay
 
 All run against scratch copies or in-memory ledgers.
+
+## 6. Remediation addendum (2026-10-07, evening)
+
+Appended after the audit; sections 0–5 are unchanged. Nothing was pushed or installed into a
+running environment, and no frozen v1b artifact was touched.
+
+| # | Status now | Commit(s) | Evidence |
+|---|---|---|---|
+| V4 | **FIXED** | governance `86f922d` | `AuthorityPermit` carries an HMAC signature checked by `PermitAuthority`. A ledger without an authority refuses privileged events; self-minted, tampered, other-key, expired and reused permits are rejected (tests in `test_dynamic_ledger.py`). The audit's `forge.py` is now refused. |
+| V5 | **FIXED** | governance `86f922d`, bridge `2b4043d` | The held-out boolean is gone. The gate takes the search batches' digests and blocks on overlap or a missing search record. The promotion manager recomputes batches from raw packages. Bridge checks verification counts against every `counts_sha` in the search ledgers. |
+| V3 | **FIXED** | osiris-cli `640a01c5` | A pass without a receipt naming the candidate digest fails (`RECEIPT_MISSING`). `receipt.py`: all three cases refused. |
+| H2 | **FIXED** | osiris-cli `640a01c5`, `3f7788cd` | Hypotheses declare which experiment kind decides them; `record_outcome` refuses other kinds (`HYPOTHESIS_EXPERIMENT_MISMATCH`). The hyp-1 replay on a fresh copy is refused. Limit: same-kind evidence that measured a different metric is not detected. |
+| B1 | **FIXED** | bridge `2b4043d`, governance `1bd75ce` | Verification scores are recomputed from raw Aer counts as mean per-qubit \|+> survival (the `survival_plus` metric; the verifier's earlier `survival_fidelity` is a different quantity). A tampered score is caught. The 5-batch floor is kept. `osiris-governance` is declared as bridge's `[governance]` extra. |
+| E3 | **FIXED in code; not installed** | osiris-cli `8f3329c7` | `bench_tasks` ships as package data. Suite hash unchanged (`09037df6…`). A wheel installed into a scratch target loaded all 9 tasks. Bench results now go to `~/.osiris/bench`. |
+| E1 | **OPEN (scheduled)** | osiris-cli `ade6bba8` (v4.3.2) | Built and checked in a scratch target only. Install into `aer_venv` after the NCLM-1 v1b window closes (2026-10-08 23:59:59 UTC). |
+| E2 | **CLOSED as a decision** | none | `/sprint execute` keeps its own gates: assigned write path, protected-file check, sandbox, and human `/apply`. Wiring the hardened loop would add an AST screen and receipt binding, but would make the console require osiris-governance, which Termux cannot import. The benchmark keeps own-test verification because that loop is what it measures against hidden tests. |
+| E4 | **OPEN** | none | Termux still runs `/root/repos/osiris-cli` v4.2.1 and cannot import osiris-governance. Sync after the window. |
+| V6 | **OPEN** | none | No OS boundary. On this device Termux and PRoot share one Android app user, so a key file on the phone is readable by the agent. A real boundary needs the permit key off the device (for example a CI runner holding it as a secret and verifying pushed raw packages). |
+| — | **FIXED** (found during remediation) | osiris-cli `529bc278` | `nclm_analysis.py` labelled rows 1-based, never matched hashes, left timestamps empty, compared against a stale 7.60 and printed its own gate verdict. It now uses ledger indices, the frozen 5.0805 and defers to the registered evaluator. `nclm_final_report.csv` regenerated. |
+
+Still for the operator: rotate the leaked `GOOGLE_API_KEY` and Neon password; for NCLM v2, seed
+model initialization and save the step-0 checkpoint before exchange 0.
+
+Tests after remediation: osiris-governance 119 passed; bridge 30 passed; osiris-cli every test
+file passed individually; in `test_integration.py` 20 of 22 passed, and the two
+`TestSwarmDeliberation` tests did not finish within 25 minutes because they wait on the live local
+`qwen2.5:7b` model. `osiris_ncllm_swarm` imports none of the changed modules.
