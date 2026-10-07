@@ -43,6 +43,15 @@ PERMITTED_PLANES_BY_CLAIM_TYPE: Dict[ClaimType, Set[EvidencePlane]] = {
     ClaimType.HARDWARE_EXECUTION_CONFIRMED: {EvidencePlane.HARDWARE_EXECUTION},
     ClaimType.SCIENTIFIC_CLAIM_SUPPORTED: {EvidencePlane.SCIENTIFIC_EXPERIMENTAL},
     ClaimType.RELEASE_AUTHORIZED: {EvidencePlane.GOVERNANCE},
+    ClaimType.EVIDENCE_INTEGRITY_VERIFIED: {
+        EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
+        EvidencePlane.REPRODUCIBILITY,
+        EvidencePlane.HARDWARE_EXECUTION,
+    },
+    ClaimType.PROMOTION_GATE_PASSED: {
+        EvidencePlane.SCIENTIFIC_EXPERIMENTAL,
+        EvidencePlane.GOVERNANCE,
+    },
 }
 
 

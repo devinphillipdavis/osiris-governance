@@ -81,3 +81,28 @@ class AuthorityGateError(GovernanceViolation):
 class MutableReferenceError(GovernanceViolation):
     """Raised when a mutable reference (e.g. git branch, tag, latest) is used instead of an immutable content digest."""
     pass
+
+
+class EvidenceIntegrityError(GovernanceViolation):
+    """Raised when numbers in a claim cannot be verified or recomputed from raw data."""
+    pass
+
+
+class StatisticalGateError(GovernanceViolation):
+    """Raised when a candidate fails the statistical promotion gate or A/A simulation rejects calibration."""
+    pass
+
+
+class SymbolicInvarianceError(GovernanceViolation):
+    """Raised when a proposed parameter has zero derivative with respect to target observable (Anti-Seked)."""
+    pass
+
+
+class NoiselessBaselineError(GovernanceViolation):
+    """Raised when a claimed physical discovery matches noiseless unitary simulation baselines."""
+    pass
+
+
+class PromotionRollbackError(GovernanceViolation):
+    """Raised when a promoted champion exhibits performance regression or drift."""
+    pass
