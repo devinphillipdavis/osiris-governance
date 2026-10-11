@@ -25,12 +25,13 @@ src/osiris_governance/
 └── errors.py          # Typed GovernanceViolation hierarchy
 ```
 
-## Documentation
+## Governance & Architecture Documentation Suite
 
+- [`OSIRIS_GOVERNANCE_PRINCIPLES.md`](docs/OSIRIS_GOVERNANCE_PRINCIPLES.md): Core axioms, cross-plane non-substitution invariant ($\text{SCIENCE} \not\vdash \text{DEPLOYMENT}$), adverse-first rule, and vocabulary standards.
+- [`OSIRIS_RELEASE_TARGET_ARCHITECTURE.md`](docs/OSIRIS_RELEASE_TARGET_ARCHITECTURE.md): Revised 8-gate release architecture with implementation status per gate and authority monotonicity ($\text{Eligible}_{i+1} \subseteq \text{Eligible}_i$).
+- [`OSIRIS_CLOUD_RUN_SECURITY_BASELINE.md`](docs/OSIRIS_CLOUD_RUN_SECURITY_BASELINE.md): Managed Cloud Run sandbox, IAM identity separation (`actAs`), Secret Manager integration, and digest pinning (`sha256:`).
+- [`OSIRIS_ANDROID_EDGE_PROTOTYPE.md`](docs/OSIRIS_ANDROID_EDGE_PROTOTYPE.md): Android evidence cockpit and constrained node boundaries, SQLite WAL store-and-forward, and StrongBox Key Attestation target.
+- [`OSIRIS_EVIDENCE_MODEL.md`](docs/OSIRIS_EVIDENCE_MODEL.md): RFC 8785 Canonical JSON profile, four-coordinate scope binding, local hash-linked ledger model, and deterministic replay protocol.
 - [`OSIRIS_CLAIM_CLOSURE.md`](docs/OSIRIS_CLAIM_CLOSURE.md): Signed claim closure records: pack layout, two-stage verification, policy v1, and what verification does not establish. CLI: `scripts/closure_pack.py`.
-  * Financial KPI: Digital Rights Retention Rate (100\% hardware-enforced protection; zero audit expenditure).
+- [`CLAIM_AUDIT.md`](docs/CLAIM_AUDIT.md): Master audit and de-scoping register mapping 20 technical assertions to code, tests, and public wording.
 
-Strategic Executive Summary
-
-* The Fundamental Shift: Encoding classical enterprise datasets into quantum state amplitudes converts information from an infinitely copyable, nonrival resource into a physical consumable good subject to measurement collapse.
-* Restoration of Perfect Co
