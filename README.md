@@ -28,3 +28,9 @@ src/osiris_governance/
 ## Documentation
 
 - [`OSIRIS_CLAIM_CLOSURE.md`](docs/OSIRIS_CLAIM_CLOSURE.md): Signed claim closure records: pack layout, two-stage verification, policy v1, and what verification does not establish. CLI: `scripts/closure_pack.py`.
+  * Financial KPI: Digital Rights Retention Rate (100\% hardware-enforced protection; zero audit expenditure).
+
+Strategic Executive Summary
+
+* The Fundamental Shift: Encoding classical enterprise datasets into quantum state amplitudes converts information from an infinitely copyable, nonrival resource into a physical consumable good subject to measurement collapse.
+* Restoration of Perfect Co
