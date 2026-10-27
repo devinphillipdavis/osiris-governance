@@ -11,6 +11,7 @@ from .canonical import (
 )
 from .closure import closure_signing_payload, validate_closure
 from .closure_verify import ClosureVerificationReport, sign_closure, verify_closure
+from .telemetry import RunSummary, TelemetryRun, record_violations, seal_payload, verify_run
 from .scientific_evidence import (
     ScientificEvidencePackResult,
     ScientificEvidenceStatus,
@@ -74,6 +75,7 @@ from .errors import (
     SymbolicInvarianceError,
     NoiselessBaselineError,
     PromotionRollbackError,
+    TelemetryValidationError,
 )
 from .evidence_verifier import (
     DEFAULT_NUMERICAL_TOLERANCE,
@@ -151,6 +153,12 @@ __all__ = [
     "verify_closure",
     "ClosureVerificationReport",
     "ClosureValidationError",
+    "TelemetryRun",
+    "RunSummary",
+    "TelemetryValidationError",
+    "record_violations",
+    "verify_run",
+    "seal_payload",
     "SigningUnavailableError",
     "canonical_sha256",
     "canonicalize_json",

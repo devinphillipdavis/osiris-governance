@@ -91,6 +91,14 @@ class ClosureValidationError(GovernanceViolation):
         super().__init__("; ".join(self.violations) or "closure invalid")
 
 
+class TelemetryValidationError(GovernanceViolation):
+    """Raised when a telemetry record or run violates OSIRIS-TELEMETRY-V1; carries every violation found."""
+
+    def __init__(self, violations):
+        self.violations = list(violations)
+        super().__init__("; ".join(self.violations) or "telemetry invalid")
+
+
 class SigningUnavailableError(GovernanceError):
     """Raised when signing or signature verification is requested without the `cryptography` package."""
     pass
