@@ -26,16 +26,19 @@ Records hold measurements, not claims: there is no claim ceiling or deployment a
 A claim about a run goes through a closure (closure.py). A run is sealed by signing
 seal_payload() with an enrolled node key (signing.py).
 
+Drift checks (bottom of this module) compare one metric's time-ordered series from a verified
+run with replicas of that series drawn from a model without drift.
+
 The package does no file I/O (INV-13): callers pass lines in and append the lines returned.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from fractions import Fraction
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .canonical import JCS_SAFE_INTEGER_MAX, canonical_sha256, canonicalize_json, strict_parse_json
 from .errors import SchemaValidationError, TelemetryValidationError
@@ -377,6 +380,11 @@ class RunSummary:
         return not self.violations
 
 
+def _raw(line: bytes | str) -> bytes:
+    raw = line.encode("utf-8") if isinstance(line, str) else bytes(line)
+    return raw[:-1] if raw.endswith(b"\n") else raw
+
+
 def verify_run(lines: Iterable[bytes | str]) -> RunSummary:
     """Checks a whole run, one line per record; every problem is reported as "line N: CODE: message".
 
@@ -385,9 +393,7 @@ def verify_run(lines: Iterable[bytes | str]) -> RunSummary:
     chain = _Chain()
     violations: List[str] = []
     for number, line in enumerate(lines, 1):
-        raw = line.encode("utf-8") if isinstance(line, str) else bytes(line)
-        if raw.endswith(b"\n"):
-            raw = raw[:-1]
+        raw = _raw(line)
         problems: List[str] = []
         record = None
         try:
@@ -452,3 +458,219 @@ def seal_payload(summary: RunSummary) -> bytes:
         "schema_version": SCHEMA_VERSION, "document_type": SEAL, "run_id": summary.run_id,
         "records": summary.records, "head": summary.head,
     })
+
+
+# --------------------------------------------------------------------------------------------
+# Drift
+# --------------------------------------------------------------------------------------------
+#
+# A drift check compares a statistic of the observed series with the same statistic of replicas
+# drawn from a model that has no drift: posterior predictive replicates, kept in the observed
+# order and conditions. The caller draws the replicas and chooses every threshold (alpha, CUSUM
+# allowance and limit) before seeing the data; nothing here has a default threshold.
+#
+# dispersion is the heterogeneity check: it grows with any extra job-to-job noise. The time-order
+# checks (lag1_autocorrelation, trend_r2, cusum_peak, session_eta2) do not change when the series
+# is scaled, so extra noise without time structure does not move them; only ordering does.
+# All arithmetic is exact: values are ints or Fractions, never floats.
+
+Number = Union[int, Fraction]
+DRIFT_CHECKS = ("dispersion", "lag1_autocorrelation", "trend_r2", "cusum_peak", "session_eta2")
+_EPOCH = datetime(1970, 1, 1)
+
+
+def _exact(values: Iterable[Number], minimum: int, what: str = "values") -> List[Fraction]:
+    out = []
+    for v in values:
+        if isinstance(v, bool) or not isinstance(v, (int, Fraction)):
+            raise TypeError(f"drift statistics take ints and Fractions, not {type(v).__name__}")
+        out.append(Fraction(v))
+    if len(out) < minimum:
+        raise ValueError(f"need at least {minimum} {what}, got {len(out)}")
+    return out
+
+
+def _centered(xs: List[Fraction]) -> Tuple[List[Fraction], Fraction]:
+    """Deviations from the mean and their sum of squares."""
+    mean = sum(xs, Fraction(0)) / len(xs)
+    dev = [x - mean for x in xs]
+    return dev, sum((d * d for d in dev), Fraction(0))
+
+
+def _paired(times: Sequence[Number], values: Sequence[Number]) -> Tuple[List[Fraction], List[Fraction]]:
+    ts, xs = _exact(times, 3, "times"), _exact(values, 3)
+    if len(ts) != len(xs):
+        raise ValueError(f"{len(ts)} times for {len(xs)} values")
+    return ts, xs
+
+
+def dispersion(values: Sequence[Number]) -> Fraction:
+    """Sample variance (n - 1 denominator)."""
+    xs = _exact(values, 2)
+    return _centered(xs)[1] / (len(xs) - 1)
+
+
+def lag1_autocorrelation(values: Sequence[Number]) -> Fraction:
+    """sum(d[t] * d[t+1]) / sum(d[t]**2), d the deviations from the mean; 0 for a constant series."""
+    dev, ss = _centered(_exact(values, 3))
+    if ss == 0:
+        return Fraction(0)
+    return sum((a * b for a, b in zip(dev, dev[1:])), Fraction(0)) / ss
+
+
+def trend_slope(times: Sequence[Number], values: Sequence[Number]) -> Fraction:
+    """Least-squares slope of value on time, in value units per time unit."""
+    ts, xs = _paired(times, values)
+    dt, stt = _centered(ts)
+    if stt == 0:
+        raise ValueError("every time is the same, so there is no trend to fit")
+    return sum((a * b for a, b in zip(dt, _centered(xs)[0])), Fraction(0)) / stt
+
+
+def trend_r2(times: Sequence[Number], values: Sequence[Number]) -> Fraction:
+    """Squared correlation of value with time (either direction); 0 for a constant series."""
+    ts, xs = _paired(times, values)
+    (dt, stt), (dx, sxx) = _centered(ts), _centered(xs)
+    if stt == 0:
+        raise ValueError("every time is the same, so there is no trend to fit")
+    if sxx == 0:
+        return Fraction(0)
+    sxy = sum((a * b for a, b in zip(dt, dx)), Fraction(0))
+    return sxy * sxy / (stt * sxx)
+
+
+def cusum_peak(values: Sequence[Number]) -> Fraction:
+    """max S[k]**2 / sum(d**2), S[k] the running sum of deviations from the mean.
+
+    The squared, scale-free CUSUM change-point statistic: small when the level never shifts, at
+    most n / 4, which a clean step halfway reaches. 0 for a constant series.
+    """
+    dev, ss = _centered(_exact(values, 2))
+    if ss == 0:
+        return Fraction(0)
+    peak, running = Fraction(0), Fraction(0)
+    for d in dev:
+        running += d
+        peak = max(peak, running * running)
+    return peak / ss
+
+
+def session_eta2(values: Sequence[Number], sessions: Sequence[Hashable]) -> Fraction:
+    """Share of the variation that lies between sessions (one-way ANOVA eta squared).
+
+    sessions labels each value, e.g. with the backend calibration it ran under. 0 for a constant
+    series; 1 when every session is constant at its own level.
+    """
+    xs = _exact(values, 2)
+    if len(sessions) != len(xs):
+        raise ValueError(f"{len(sessions)} session labels for {len(xs)} values")
+    groups: Dict[Hashable, List[Fraction]] = {}
+    for label, x in zip(sessions, xs):
+        groups.setdefault(label, []).append(x)
+    if len(groups) < 2:
+        raise ValueError("needs at least two sessions")
+    total = _centered(xs)[1]
+    if total == 0:
+        return Fraction(0)
+    within = sum((_centered(g)[1] for g in groups.values()), Fraction(0))
+    return (total - within) / total
+
+
+@dataclass(frozen=True)
+class Cusum:
+    upper: List[Fraction]
+    lower: List[Fraction]
+    alarm: Optional[int]          # index of the first value at which either sum passed the limit
+
+
+def cusum(values: Sequence[Number], target: Number, allowance: Number, limit: Number) -> Cusum:
+    """Two-sided tabular CUSUM (Page, 1954) in the values' own units, for monitoring.
+
+    upper[k] = max(0, upper[k-1] + x[k] - target - allowance)
+    lower[k] = max(0, lower[k-1] + target - x[k] - allowance)
+    alarm is the first k where either exceeds limit. target, allowance and limit are the caller's;
+    how often a limit alarms on a series without drift depends on the series' scale and length.
+    """
+    xs = _exact(values, 1)
+    target, allowance, limit = _exact((target, allowance, limit), 3, "parameters")
+    if allowance < 0 or limit <= 0:
+        raise ValueError("allowance must be >= 0 and limit > 0")
+    upper, lower, alarm = [], [], None
+    u = l = Fraction(0)
+    for k, x in enumerate(xs):
+        u = max(Fraction(0), u + x - target - allowance)
+        l = max(Fraction(0), l + target - x - allowance)
+        upper.append(u)
+        lower.append(l)
+        if alarm is None and (u > limit or l > limit):
+            alarm = k
+    return Cusum(upper, lower, alarm)
+
+
+def predictive_p_value(observed: Number, replicated: Sequence[Number], tail: str = "upper") -> Fraction:
+    """(1 + replicas at least as extreme as observed) / (1 + replicas).
+
+    Never 0: with S replicas the smallest p is 1 / (S + 1). Ties count as at least as extreme.
+    """
+    obs = _exact((observed,), 1, "observed")[0]
+    reps = _exact(replicated, 1, "replicas")
+    if tail == "upper":
+        extreme = sum(1 for r in reps if r >= obs)
+    elif tail == "lower":
+        extreme = sum(1 for r in reps if r <= obs)
+    else:
+        raise ValueError(f"tail must be 'upper' or 'lower', got {tail!r}")
+    return Fraction(1 + extreme, 1 + len(reps))
+
+
+def drift_p_values(times: Sequence[Number], values: Sequence[Number], replicates: Sequence[Sequence[Number]],
+                   sessions: Optional[Sequence[Hashable]] = None) -> Dict[str, Fraction]:
+    """Upper-tail predictive p-value of every check in DRIFT_CHECKS for one series.
+
+    replicates are series drawn from the no-drift model, each as long as values and in the same
+    order. session_eta2 is included only when sessions name at least two sessions.
+    """
+    if not replicates or any(len(r) != len(values) for r in replicates):
+        raise ValueError("every replicate must be a series as long as the observed one")
+    checks = {
+        "dispersion": dispersion,
+        "lag1_autocorrelation": lag1_autocorrelation,
+        "trend_r2": lambda xs: trend_r2(times, xs),
+        "cusum_peak": cusum_peak,
+    }
+    if sessions is not None and len(set(sessions)) >= 2:
+        checks["session_eta2"] = lambda xs: session_eta2(xs, sessions)
+    return {name: predictive_p_value(stat(values), [stat(r) for r in replicates])
+            for name, stat in checks.items()}
+
+
+def _seconds(ts: str) -> Fraction:
+    whole, fraction = _instant(ts)
+    return (whole - _EPOCH) // timedelta(seconds=1) + fraction
+
+
+def metric_series(lines: Iterable[bytes | str], metric: str) -> Tuple[List[Fraction], List[Fraction]]:
+    """(times, values) of one metric across a verified run's frames, in chain order.
+
+    A time is the frame's window midpoint in seconds after the first such frame's midpoint.
+    Raises TelemetryValidationError if the run does not verify or the metric changes unit.
+    """
+    lines = list(lines)
+    summary = verify_run(lines)
+    if not summary.ok:
+        raise TelemetryValidationError(summary.violations)
+    times: List[Fraction] = []
+    values: List[Fraction] = []
+    unit = None
+    for line in lines:
+        rec = strict_parse_json(_raw(line))
+        q = rec.get("metrics", {}).get(metric) if rec["document_type"] == FRAME else None
+        if q is None:
+            continue
+        if unit is not None and q["unit"] != unit:
+            raise TelemetryValidationError([f"UNIT_MISMATCH: {metric} is in {q['unit']!r} at seq {rec['seq']}, "
+                                            f"{unit!r} before"])
+        unit = q["unit"]
+        times.append((_seconds(rec["window"]["start"]) + _seconds(rec["window"]["end"])) / 2)
+        values.append(magnitude(q))
+    return [t - times[0] for t in times], values
