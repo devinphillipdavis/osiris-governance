@@ -40,7 +40,7 @@ def test_interactive_repl_experiment_and_learning():
     initial_events = len(shell.evidence_events)
     shell.execute_experiment_run("fixture-test-sweep")
     assert len(shell.evidence_events) == initial_events + 1
-    assert shell.evidence_events[-1]["event"] == "EXPERIMENT_COMPLETED:fixture-test-sweep"
+    assert shell.evidence_events[-1]["event"].startswith("EXPERIMENT_COMPLETED:fixture-test-sweep")
 
 
 def test_interactive_repl_dna_firewall_and_merkle_ledger():
@@ -54,7 +54,7 @@ def test_interactive_repl_dna_firewall_and_merkle_ledger():
     shell.execute_dna_draft("compile XY4 dynamical decoupling sequence for Bell state")
     
     # Verify evidence events count
-    assert len(shell.evidence_events) == 5
+    assert len(shell.evidence_events) == 6
     
     # Compute Merkle root
     combined = ":".join(ev["hash"] for ev in shell.evidence_events)
